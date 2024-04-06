@@ -115,10 +115,10 @@ static __global__ void mul_mat_vec_q_fast(
     const int blocks_per_row_x0 = blocks_per_row_x - blocks_per_row_x % blocks_per_iter;
     for (int kbx = 0; kbx < blocks_per_row_x0; kbx += blocks_per_iter) {
         const int* y_col = (int*)&y[kbx * (qk/QK8_1)];
-        *((int*)&y_shared + tid) = y_col[tid];
-        *((int*)&y_shared + 128 + tid) = y_col[128 + tid]; // 128 = nwarps * WARP_SIZE
+        *((int*)y_shared + tid) = y_col[tid];
+        *((int*)y_shared + 128 + tid) = y_col[128 + tid]; // 128 = nwarps * WARP_SIZE
         if (threadIdx.y == 0) {
-            *((int*)&y_shared + 256 + threadIdx.x) = y_col[256 + threadIdx.x];
+            *((int*)y_shared + 256 + threadIdx.x) = y_col[256 + threadIdx.x];
         }
         __syncthreads();
         if (row < nrows_x) {

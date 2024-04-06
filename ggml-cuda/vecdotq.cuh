@@ -1199,18 +1199,15 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
 
 static __device__ __forceinline__ void get_int_from_table_16(const uint32_t & q4, const uint32_t* values,
         int & val1, int & val2) {
-    uint32_t aux32 = q4;
-    aux32 = (aux32 & 0xf00ff00f) | ((aux32 & 0x0f000f00) >> 4) | ((aux32 & 0x00f000f0) << 4);
-    aux32 = __byte_perm(aux32, aux32, 0x3120);
-
-    uint32_t v1, v2;
-    v1 = __byte_perm(values[0], values[1], aux32);
-    v2 = __byte_perm(values[2], values[3], aux32);
-    val1 = __byte_perm(v1, v2, 0x3210 | ((aux32 & 0x8888) >> 1));
-    aux32 = aux32 >> 16;
-    v1 = __byte_perm(values[0], values[1], aux32);
-    v2 = __byte_perm(values[2], values[3], aux32);
-    val2 = __byte_perm(v1, v2, 0x3210 | ((aux32 & 0x8888) >> 1));
+    uint32_t v1, v2, v3, v4;
+    v1 = __byte_perm(values[0], values[1], q4);
+    v2 = __byte_perm(values[2], values[3], q4);
+    v3 = __byte_perm(v1, v2, 0x3210 | ((q4 & 0x00008888) >> 1));
+    v1 = __byte_perm(values[0], values[1], q4 >> 16);
+    v2 = __byte_perm(values[2], values[3], q4 >> 16);
+    v4 = __byte_perm(v1, v2, 0x3210 | ((q4 & 0x88880000) >> 17));
+    val1 = __byte_perm(v3, v4, 0x6420);
+    val2 = __byte_perm(v3, v4, 0x7531);
 }
 
 static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
