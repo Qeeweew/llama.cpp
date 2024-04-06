@@ -81,6 +81,80 @@ static __global__ void mul_mat_vec_q(
     }
 }
 
+template <typename block_q_t, vec_dot_q_cuda_t vec_dot_q_cuda>
+#if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
+// tell the compiler to use as many registers as it wants, see nwarps definition below
+__launch_bounds__(4*WARP_SIZE, 1)
+#endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
+static __global__ void mul_mat_vec_q_fast(
+    const void * __restrict__ vx, const void * __restrict__ vy, float * __restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_y, const int nrows_dst) {
+
+    // blockDim.x = 32 && blockDim.y = 4
+    constexpr int qk = 256;
+    constexpr int qi = 8;
+    constexpr int vdr = 1;
+    constexpr int nwarps = 4;
+    constexpr int blocks_per_iter = vdr * WARP_SIZE / qi;
+
+    const int tid = WARP_SIZE*threadIdx.y + threadIdx.x;
+    const int row = nwarps * blockIdx.x +  threadIdx.y;
+    const int blocks_per_row_x = ncols_x / qk;
+    // const int blocks_per_col_y = nrows_y / QK8_1;
+
+// partial sum for each thread
+    float tmp = {0.0f};
+
+    const block_q_t  * x = (const block_q_t  *) vx;
+    const block_q8_1 * y = (const block_q8_1 *) vy;
+
+    __shared__ block_q8_1 y_shared[blocks_per_iter * (qk/QK8_1)];
+    const int kqs = vdr * (threadIdx.x % (qi/vdr));
+    const int kbx_offset = threadIdx.x / (qi/vdr);
+    static_assert(sizeof(block_q8_1) * (qk/QK8_1) % 16 == 0);
+    const int blocks_per_row_x0 = blocks_per_row_x - blocks_per_row_x % blocks_per_iter;
+    for (int kbx = 0; kbx < blocks_per_row_x0; kbx += blocks_per_iter) {
+        const int* y_col = (int*)&y[kbx * (qk/QK8_1)];
+        *((int*)&y_shared + tid) = y_col[tid];
+        *((int*)&y_shared + 128 + tid) = y_col[128 + tid]; // 128 = nwarps * WARP_SIZE
+        if (threadIdx.y == 0) {
+            *((int*)&y_shared + 256 + threadIdx.x) = y_col[256 + threadIdx.x];
+        }
+        __syncthreads();
+        if (row < nrows_x) {
+            tmp += vec_dot_q_cuda(
+                &x[kbx + kbx_offset + row*blocks_per_row_x],
+                &y_shared[kbx_offset * (qk/QK8_1)], kqs);
+        }
+        __syncthreads();
+    }
+
+    __shared__ float dst_shared[nwarps];
+
+    tmp = warp_reduce_sum(tmp);
+    if (threadIdx.x == 0) {
+        dst_shared[threadIdx.y] = tmp;
+    }
+    __syncthreads();
+    const int blocks_count = blocks_per_row_x - blocks_per_row_x0;
+    const int row0 = nwarps * blockIdx.x;
+    const int row_delta = threadIdx.x / (qi/vdr);
+    if (threadIdx.y < blocks_count) {
+        const int kbx = blocks_per_row_x0 + threadIdx.y;
+        float tmp = row_delta + row0 < nrows_x ? vec_dot_q_cuda(&x[kbx + (row0+row_delta)*blocks_per_row_x], &y[kbx * (qk/QK8_1)], kqs) : 0.0f;
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 4, 8);
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 2, 8);
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 1, 8);
+        if (kqs == 0) {
+            atomicAdd(&dst_shared[row_delta], tmp);
+        }
+    }
+    __syncthreads();
+    if (threadIdx.y == 0 && kqs == 0 && row_delta + row0 < nrows_x) {
+        dst[row_delta + row0] = dst_shared[row_delta];
+    }
+}
+
 template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot>
 static void mul_mat_vec_q_cuda(
     const void * vx, const void * vy, float * dst,
@@ -91,6 +165,17 @@ static void mul_mat_vec_q_cuda(
 
     int id;
     CUDA_CHECK(cudaGetDevice(&id));
+
+    if (qk == 256 && qi == 8 && vdr == 1 && ncols_y == 1) {
+        const int64_t nwarps = 4;
+        const int64_t rows_per_cuda_block = nwarps;
+        const int64_t nblocks = (nrows_x + rows_per_cuda_block - 1) / rows_per_cuda_block;
+        const dim3 block_nums(nblocks, 1, 1);
+        const dim3 block_dims(WARP_SIZE, nwarps, 1);
+        mul_mat_vec_q_fast<block_q_t, vec_dot>
+            <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
+        return;
+    }
 
     int64_t nwarps = 1;
     int64_t rows_per_cuda_block = 1;

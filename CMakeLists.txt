@@ -849,7 +849,7 @@ endif()
 set(CUDA_CXX_FLAGS "")
 
 if (LLAMA_CUDA)
-    set(CUDA_FLAGS -use_fast_math)
+    set(CUDA_FLAGS -use_fast_math -lineinfo)
 
     if (LLAMA_FATAL_WARNINGS)
         list(APPEND CUDA_FLAGS -Werror all-warnings)
