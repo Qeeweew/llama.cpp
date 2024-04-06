@@ -1197,21 +1197,21 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
 #endif
 }
 
-#if __CUDA_ARCH__ >= MIN_CC_DP4A // lowest compute capability for integer intrinsics
-static __device__ __forceinline__ void get_int_from_table_16(const uint32_t & q4, const uint8_t * values,
+static __device__ __forceinline__ void get_int_from_table_16(const uint32_t & q4, const uint32_t* values,
         int & val1, int & val2) {
+    uint32_t aux32 = q4;
+    aux32 = (aux32 & 0xf00ff00f) | ((aux32 & 0x0f000f00) >> 4) | ((aux32 & 0x00f000f0) << 4);
+    aux32 = __byte_perm(aux32, aux32, 0x3120);
 
-    uint32_t aux32; const uint8_t * q8 = (const uint8_t *)&aux32;
-    aux32 = q4 & 0x0f0f0f0f;
-    uint16_t v1 = values[q8[0]] | (values[q8[1]] << 8);
-    uint16_t v2 = values[q8[2]] | (values[q8[3]] << 8);
-    val1 = v1 | (v2 << 16);
-    aux32 = (q4 >> 4) & 0x0f0f0f0f;
-    v1 = values[q8[0]] | (values[q8[1]] << 8);
-    v2 = values[q8[2]] | (values[q8[3]] << 8);
-    val2 = v1 | (v2 << 16);
+    uint32_t v1, v2;
+    v1 = __byte_perm(values[0], values[1], aux32);
+    v2 = __byte_perm(values[2], values[3], aux32);
+    val1 = __byte_perm(v1, v2, 0x3210 | ((aux32 & 0x8888) >> 1));
+    aux32 = aux32 >> 16;
+    v1 = __byte_perm(values[0], values[1], aux32);
+    v2 = __byte_perm(values[2], values[3], aux32);
+    val2 = __byte_perm(v1, v2, 0x3210 | ((aux32 & 0x8888) >> 1));
 }
-#endif
 
 static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
@@ -1222,7 +1222,7 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
     const uint16_t * q4 = (const uint16_t *)bq->qs + 2*iqs;
     const int32_t  * q8 = (const int32_t  *)bq8_1->qs + iqs;
 
-    const uint8_t * values = (const uint8_t *)kvalues_iq4nl;
+    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
 
     int v1, v2;
     int sumi1 = 0, sumi2 = 0;
@@ -1254,7 +1254,7 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 #if __CUDA_ARCH__ >= MIN_CC_DP4A // lowest compute capability for integer intrinsics
 
     const block_iq4_xs * bq4 = (const block_iq4_xs *) vbq;
-    const uint8_t * values = (const uint8_t *)kvalues_iq4nl;
+    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
 
     // iqs is 0...7
     const int ib32 = iqs;
