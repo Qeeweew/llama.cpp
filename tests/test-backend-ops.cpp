@@ -2015,6 +2015,7 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
                 for (int id = 0; id < n_mats; id++) {
                     for (bool v : {false, true}) {
                         test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, n_mats, id, 16, 16, 256, v));
+                        test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, n_mats, id, 16, 16, 1024, v));
                     }
                 }
             }

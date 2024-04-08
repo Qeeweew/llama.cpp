@@ -121,11 +121,9 @@ static __global__ void mul_mat_vec_q_fast(
             *((int*)y_shared + 256 + threadIdx.x) = y_col[256 + threadIdx.x];
         }
         __syncthreads();
-        if (row < nrows_x) {
-            tmp += vec_dot_q_cuda(
-                &x[kbx + kbx_offset + row*blocks_per_row_x],
-                &y_shared[kbx_offset * (qk/QK8_1)], kqs);
-        }
+        tmp += vec_dot_q_cuda(
+            &x[kbx + kbx_offset + row*blocks_per_row_x],
+            &y_shared[kbx_offset * (qk/QK8_1)], kqs);
         __syncthreads();
     }
 
@@ -141,7 +139,7 @@ static __global__ void mul_mat_vec_q_fast(
     const int row_delta = threadIdx.x / (qi/vdr);
     if (threadIdx.y < blocks_count) {
         const int kbx = blocks_per_row_x0 + threadIdx.y;
-        float tmp = row_delta + row0 < nrows_x ? vec_dot_q_cuda(&x[kbx + (row0+row_delta)*blocks_per_row_x], &y[kbx * (qk/QK8_1)], kqs) : 0.0f;
+        float tmp = vec_dot_q_cuda(&x[kbx + (row0+row_delta)*blocks_per_row_x], &y[kbx * (qk/QK8_1)], kqs);
         tmp += __shfl_xor_sync(0xffffffff, tmp, 4, 8);
         tmp += __shfl_xor_sync(0xffffffff, tmp, 2, 8);
         tmp += __shfl_xor_sync(0xffffffff, tmp, 1, 8);
@@ -150,7 +148,7 @@ static __global__ void mul_mat_vec_q_fast(
         }
     }
     __syncthreads();
-    if (threadIdx.y == 0 && kqs == 0 && row_delta + row0 < nrows_x) {
+    if (threadIdx.y == 0 && kqs == 0) {
         dst[row_delta + row0] = dst_shared[row_delta];
     }
 }
@@ -166,7 +164,7 @@ static void mul_mat_vec_q_cuda(
     int id;
     CUDA_CHECK(cudaGetDevice(&id));
 
-    if (qk == 256 && qi == 8 && vdr == 1 && ncols_y == 1) {
+    if (qk == 256 && qi == 8 && vdr == 1 && ncols_y == 1 && nrows_x % 4 == 0) {
         const int64_t nwarps = 4;
         const int64_t rows_per_cuda_block = nwarps;
         const int64_t nblocks = (nrows_x + rows_per_cuda_block - 1) / rows_per_cuda_block;
