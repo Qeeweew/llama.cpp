@@ -119,6 +119,7 @@ Typically finetunes of the base models below are supported as well.
 - [x] [Xverse](https://huggingface.co/models?search=xverse)
 - [x] [Command-R](https://huggingface.co/CohereForAI/c4ai-command-r-v01)
 - [x] [SEA-LION](https://huggingface.co/models?search=sea-lion)
+- [x] [GritLM-7B](https://huggingface.co/GritLM/GritLM-7B) + [GritLM-8x7B](https://huggingface.co/GritLM/GritLM-8x7B)
 
 **Multimodal models:**
 
@@ -182,6 +183,7 @@ Unless otherwise noted these projects are open-source with permissive licensing:
 - [KanTV](https://github.com/zhouwg/kantv?tab=readme-ov-file)(Apachev2.0 or later)
 - [Dot](https://github.com/alexpinel/Dot) (GPL)
 - [MindMac](https://mindmac.app) (proprietary)
+- [KodiBot](https://github.com/firatkiral/kodibot) (GPL)
 
 *(to have a project listed here, it should clearly state that it depends on `llama.cpp`)*
 
@@ -518,7 +520,7 @@ Building the program with BLAS support may lead to some performance improvements
     set PATH=%HIP_PATH%\bin;%PATH%
     mkdir build
     cd build
-    cmake -G Ninja -DAMDGPU_TARGETS=gfx1100 -DLLAMA_HIPBLAS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ ..
+    cmake -G Ninja -DAMDGPU_TARGETS=gfx1100 -DLLAMA_HIPBLAS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release ..
     cmake --build .
     ```
     Make sure that `AMDGPU_TARGETS` is set to the GPU arch you want to compile for. The above example uses `gfx1100` that corresponds to Radeon RX 7900XTX/XT/GRE. You can find a list of targets [here](https://llvm.org/docs/AMDGPUUsage.html#processors)
