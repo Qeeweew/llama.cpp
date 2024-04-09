@@ -709,6 +709,34 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
 }
 
+static __device__ __forceinline__ float vec_dot_q4_K_q8_1_fast(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+
+    const block_q4_K * bq4_K = (const block_q4_K *) vbq;
+
+    uint8_t sc, m4;
+    const uint8_t* q = bq4_K->scales;
+    if (iqs < 4) {
+        sc = q[iqs] & 63; m4 = q[iqs + 4] & 63;
+    } else {
+        sc = (q[iqs+4] & 0xF) | ((q[iqs-4] >> 6) << 4);
+        m4 = (q[iqs+4] >>  4) | ((q[iqs-0] >> 6) << 4);
+    }
+    const int* v = (const int*) bq4_K->qs + iqs / 2 * 8;
+    const int* q8 = (const int*) bq8_1[iqs].qs;
+    int dot_sum = 0;
+    #pragma unroll
+    for (int j = 0;j < 8;j++) {
+        dot_sum = __dp4a(*q8, (v[j] >> 4*(iqs&1)) & 0x0f0f0f0f, dot_sum);
+        q8++;
+    }
+    const float2 ds8f = __half22float2(bq8_1[iqs].ds);
+    const float2 dm4f = __half22float2(bq4_K->dm);
+    float sumf_d = ds8f.x * (dot_sum * sc);
+    float sumf_m = ds8f.y * m4;
+    return dm4f.x * sumf_d - dm4f.y * sumf_m;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
 
