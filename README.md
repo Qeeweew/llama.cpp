@@ -95,7 +95,7 @@ Typically finetunes of the base models below are supported as well.
 - [X] [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.1)
 - [x] [Mixtral MoE](https://huggingface.co/models?search=mistral-ai/Mixtral)
 - [x] [DBRX](https://huggingface.co/databricks/dbrx-instruct)
-- [X] Falcon
+- [X] [Falcon](https://huggingface.co/models?search=tiiuae/falcon)
 - [X] [Chinese LLaMA / Alpaca](https://github.com/ymcui/Chinese-LLaMA-Alpaca) and [Chinese LLaMA-2 / Alpaca-2](https://github.com/ymcui/Chinese-LLaMA-Alpaca-2)
 - [X] [Vigogne (French)](https://github.com/bofenghuang/vigogne)
 - [X] [Koala](https://bair.berkeley.edu/blog/2023/04/03/koala/)
@@ -549,7 +549,7 @@ Building the program with BLAS support may lead to some performance improvements
   OpenCL acceleration is provided by the matrix multiplication kernels from the [CLBlast](https://github.com/CNugteren/CLBlast) project and custom kernels for ggml that can generate tokens on the GPU.
 
   You will need the [OpenCL SDK](https://github.com/KhronosGroup/OpenCL-SDK).
-    - For Ubuntu or Debian, the packages `opencl-headers`, `ocl-icd` may be needed.
+    - For Ubuntu, Debian, and Fedora the packages `opencl-headers`, `ocl-icd` may be needed.
 
     - For Windows, a pre-built SDK is available on the [OpenCL Releases](https://github.com/KhronosGroup/OpenCL-SDK/releases) page.
 
@@ -573,6 +573,12 @@ Building the program with BLAS support may lead to some performance improvements
   ##### Installing CLBlast
 
   Pre-built CLBlast binaries may be found on the [CLBlast Releases](https://github.com/CNugteren/CLBlast/releases) page. For Unix variants, it may also be found in your operating system's packages.
+
+  Linux packaging:
+  Fedora Linux:
+  ```bash
+  sudo dnf install clblast
+  ```
 
   Alternatively, they may be built from source.
 
