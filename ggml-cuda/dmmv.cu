@@ -761,10 +761,11 @@ static void dequantize_mul_mat_vec_q6_K_cuda(const void * vx, const float * y, f
 static void convert_mul_mat_vec_f16_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows, cudaStream_t stream) {
     GGML_ASSERT(ncols % GGML_CUDA_DMMV_X == 0);
     constexpr int rows_per_block = 8;
+    constexpr int iter_stride = rows_per_block * WARP_SIZE;
     const int block_num_y = (nrows + rows_per_block - 1) / rows_per_block;
     const dim3 block_nums(block_num_y, 1, 1);
     const dim3 block_dims(WARP_SIZE, rows_per_block, 1);
-    if (ncols % (rows_per_block * WARP_SIZE) == 0) {
+    if (ncols % iter_stride == 0) {
         dequantize_mul_mat_vec_f16<false>
             <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
     } else {
