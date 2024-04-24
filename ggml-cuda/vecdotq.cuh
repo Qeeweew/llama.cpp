@@ -725,10 +725,9 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_fast(
     const int* v = (const int*) bq4_K->qs + iqs / 2 * 8;
     const int* q8 = (const int*) bq8_1[iqs].qs;
     int dot_sum = 0;
-    #pragma unroll
+#pragma unroll
     for (int j = 0;j < 8;j++) {
-        dot_sum = __dp4a(*q8, (v[j] >> 4*(iqs&1)) & 0x0f0f0f0f, dot_sum);
-        q8++;
+        dot_sum = __dp4a(q8[j], (v[j] >> 4*(iqs&1)) & 0x0f0f0f0f, dot_sum);
     }
     const float2 ds8f = __half22float2(bq8_1[iqs].ds);
     const float2 dm4f = __half22float2(bq4_K->dm);
