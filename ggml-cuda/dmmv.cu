@@ -565,44 +565,12 @@ static __global__ void dequantize_mul_mat_vec_q6_k(const void * __restrict__ vx,
     }
 }
 
-template<bool need_check>
-static __global__ void dequantize_mul_mat_vec_f16(const void * __restrict__ vx, const float * __restrict__ y, float * __restrict__ dst, const int ncols, const int nrows) {
-    const int row = blockIdx.x * blockDim.y + threadIdx.y;
-    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+static __device__ void convert_f16(const void * vx, const int64_t ib, const int iqs, dfloat2 & v){
+    const half * x = (const half *) vx;
 
-    constexpr int iter_stride = 256;
-
-// partial sum for each thread
-    float tmp = 0.0f;
-    const half *x_row = (const half*) vx + (int64_t) ncols * row;
-
-    __shared__ float y_shared[iter_stride];
-
-    for (int i = 0; i < ncols; i += iter_stride) {
-        if (!need_check || i + tid < ncols) {
-            y_shared[tid] = y[i + tid];
-        }
-        __syncthreads();
-        if (row < nrows) {
-#pragma unroll
-            for (int j = 0; j < iter_stride; j += 64) {
-                const int col = j + 2 * threadIdx.x;
-                if (!need_check || i + col < ncols) {
-                    const half2 * x = (const half2 *) (x_row + i + col);
-                    float2 v = __half22float2(*x);
-                    tmp += v.x * y_shared[col + 0] + v.y * y_shared[col + 1];
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    // sum up partial sums and write back result
-    tmp = warp_reduce_sum(tmp);
-
-    if (threadIdx.x == 0 && row < nrows) {
-        dst[row] = tmp;
-    }
+    // automatic half -> float type cast if dfloat == float
+    v.x = x[ib + iqs + 0];
+    v.y = x[ib + iqs + 1];
 }
 
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel>
@@ -760,18 +728,11 @@ static void dequantize_mul_mat_vec_q6_K_cuda(const void * vx, const float * y, f
 
 static void convert_mul_mat_vec_f16_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows, cudaStream_t stream) {
     GGML_ASSERT(ncols % GGML_CUDA_DMMV_X == 0);
-    constexpr int rows_per_block = 8;
-    constexpr int iter_stride = rows_per_block * WARP_SIZE;
-    const int block_num_y = (nrows + rows_per_block - 1) / rows_per_block;
+    const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
     const dim3 block_nums(block_num_y, 1, 1);
-    const dim3 block_dims(WARP_SIZE, rows_per_block, 1);
-    if (ncols % iter_stride == 0) {
-        dequantize_mul_mat_vec_f16<false>
-            <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
-    } else {
-        dequantize_mul_mat_vec_f16<true>
-            <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
-    }
+    const dim3 block_dims(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+    dequantize_mul_mat_vec<1, 1, convert_f16>
+        <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
 }
 
 void ggml_cuda_op_dequantize_mul_mat_vec(
