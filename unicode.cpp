@@ -5,11 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <locale>
+#include <codecvt>
 
 static std::string unicode_cpts_to_utf8(const std::vector<uint32_t> & cps) {
     std::string result;
@@ -194,6 +197,245 @@ static std::unordered_map<std::string, uint8_t> unicode_utf8_to_byte_map() {
     return map;
 }
 
+static inline std::wstring unicode_wstring_from_utf8(const std::string & s) {
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+    return conv.from_bytes(s);
+}
+
+//static inline std::string unicode_wstring_to_utf8(const std::wstring & ws) {
+//    std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+//    return conv.to_bytes(ws);
+//}
+
+static std::vector<std::string> unicode_byte_encoding_process(const std::vector<std::string> & bpe_words) {
+    std::vector<std::string>bpe_encoded_words;
+    for (auto word : bpe_words) {
+        std::string text_utf = "";
+        auto utf_word =  unicode_cpts_from_utf8(word);
+        for (size_t i = 0; i < utf_word.size(); ++i)
+            text_utf += unicode_cpt_to_utf8(utf_word[i]);
+
+        std::string encoded_token = "";
+        for (char & c : text_utf) {
+            encoded_token += unicode_byte_to_utf8(c);
+        }
+        bpe_encoded_words.emplace_back(encoded_token);
+    }
+    return bpe_encoded_words;
+}
+
+// GPT2 system regex:  's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+static std::vector<size_t> unicode_gpt2_regex_preprocess(const std::string & text, const std::vector<size_t> & offsets) {
+    std::vector<size_t> bpe_offsets; // store the offset of each word
+    bpe_offsets.reserve(offsets.size()); // Reserve memory for the approximate size
+
+    size_t start = 0;
+
+    const auto cpts = unicode_cpts_from_utf8(text);
+
+    for (auto offset : offsets) {
+        std::string token;
+
+        bool collecting_numeric = false;
+        bool collecting_letter = false;
+        bool collecting_special = false;
+        bool collecting_whitespace_lookahead = false;
+        bool collecting = false;
+
+        std::vector<std::string> text_utf;
+        text_utf.reserve(offset);
+
+        for (size_t i = start; i < start + offset; ++i) {
+            text_utf.emplace_back(unicode_cpt_to_utf8(cpts[i]));
+        }
+
+        for (int i = 0; i < (int)text_utf.size(); i++) {
+            const std::string & utf_char = text_utf[i];
+            bool split_condition = false;
+            int bytes_remain = text_utf.size() - i;
+
+            // forward backward lookups
+            const std::string & utf_char_next      = (i + 1 < (int)text_utf.size()) ? text_utf[i + 1] : "";
+            const std::string & utf_char_next_next = (i + 2 < (int)text_utf.size()) ? text_utf[i + 2] : "";
+
+            // handling contractions
+            if (!split_condition && bytes_remain >= 2) {
+                // 's|'t|'m|'d
+                if (utf_char == "\'" && (utf_char_next == "s" || utf_char_next == "t" || utf_char_next == "m" || utf_char_next == "d")) {
+                    split_condition = true;
+                }
+                if (split_condition) {
+                    if (token.size()) {
+                        bpe_offsets.emplace_back(unicode_cpts_from_utf8(token).size());
+                    }
+                    token = utf_char + utf_char_next;
+                    bpe_offsets.emplace_back(unicode_cpts_from_utf8(token).size());
+                    token = "";
+                    i++;
+                    continue;
+                }
+            }
+            if (!split_condition && bytes_remain >= 3) {
+                // 're|'ve|'ll
+                if (utf_char == "\'" && (
+                    (utf_char_next == "r" && utf_char_next_next == "e") ||
+                    (utf_char_next == "v" && utf_char_next_next == "e") ||
+                    (utf_char_next == "l" && utf_char_next_next == "l"))
+                    ) {
+                    split_condition = true;
+                }
+                if (split_condition) {
+                    // current token + next token can be defined
+                    if (token.size()) {
+                        bpe_offsets.emplace_back(unicode_cpts_from_utf8(token).size());
+                    }
+                    token = utf_char + utf_char_next + utf_char_next_next;
+                    bpe_offsets.emplace_back(unicode_cpts_from_utf8(token).size());
+                    token = "";
+                    i += 2;
+                    continue;
+                }
+            }
+
+            if (!split_condition && !collecting) {
+                if (unicode_cpt_type(utf_char) == CODEPOINT_TYPE_LETTER || (!token.size() && utf_char == " " && unicode_cpt_type(utf_char_next) == CODEPOINT_TYPE_LETTER)) {
+                    collecting_letter = true;
+                    collecting = true;
+                }
+                else if (unicode_cpt_type(utf_char) == CODEPOINT_TYPE_DIGIT || (!token.size() && utf_char == " " && unicode_cpt_type(utf_char_next) == CODEPOINT_TYPE_DIGIT)) {
+                    collecting_numeric = true;
+                    collecting = true;
+                }
+                else if (
+                    ((unicode_cpt_type(utf_char) != CODEPOINT_TYPE_LETTER && unicode_cpt_type(utf_char) != CODEPOINT_TYPE_DIGIT) && (unicode_cpt_type(utf_char) != CODEPOINT_TYPE_WHITESPACE)) ||
+                    (!token.size() && utf_char == " " && unicode_cpt_type(utf_char_next) != CODEPOINT_TYPE_LETTER && unicode_cpt_type(utf_char_next) != CODEPOINT_TYPE_DIGIT && unicode_cpt_type(utf_char_next) != CODEPOINT_TYPE_WHITESPACE)
+                    ) {
+                    collecting_special = true;
+                    collecting = true;
+                }
+                else if (unicode_cpt_type(utf_char) == CODEPOINT_TYPE_WHITESPACE && unicode_cpt_type(utf_char_next) == CODEPOINT_TYPE_WHITESPACE) {
+                    collecting_whitespace_lookahead = true;
+                    collecting = true;
+                }
+                else if (unicode_cpt_type(utf_char) == CODEPOINT_TYPE_WHITESPACE) {
+                    split_condition = true;
+                }
+            }
+            else if (!split_condition && collecting) {
+                if (collecting_letter && unicode_cpt_type(utf_char) != CODEPOINT_TYPE_LETTER) {
+                    split_condition = true;
+                }
+                else if (collecting_numeric && unicode_cpt_type(utf_char) != CODEPOINT_TYPE_DIGIT) {
+                    split_condition = true;
+                }
+                else if (collecting_special && (unicode_cpt_type(utf_char) == CODEPOINT_TYPE_LETTER || unicode_cpt_type(utf_char) == CODEPOINT_TYPE_DIGIT || unicode_cpt_type(utf_char) == CODEPOINT_TYPE_WHITESPACE)) {
+                    split_condition = true;
+                }
+                else if (collecting_whitespace_lookahead && (unicode_cpt_type(utf_char_next) == CODEPOINT_TYPE_LETTER || unicode_cpt_type(utf_char_next) == CODEPOINT_TYPE_DIGIT)) {
+                    split_condition = true;
+                }
+            }
+
+            if (utf_char_next == "") {
+                split_condition = true; // final
+                token += utf_char;
+            }
+
+            if (split_condition) {
+                if (token.size()) {
+                    bpe_offsets.emplace_back(unicode_cpts_from_utf8(token).size());
+                }
+                token = utf_char;
+                collecting = false;
+                collecting_letter = false;
+                collecting_numeric = false;
+                collecting_special = false;
+                collecting_whitespace_lookahead = false;
+            }
+            else {
+                token += utf_char;
+            }
+        }
+
+        start += offset;
+    }
+
+    return bpe_offsets;
+}
+
+static std::vector<size_t> unicode_regex_preprocess(const std::wstring & wtext, const std::vector<size_t> & offsets, const std::wstring & regex_expr) {
+    std::wregex expr(regex_expr);
+    std::vector<size_t> bpe_offsets; // store the offset of each word
+    bpe_offsets.reserve(offsets.size()); // Reserve memory for the approximate size
+    size_t start = 0;
+    for (auto offset : offsets) {
+        std::wcregex_iterator it(wtext.data() + start, wtext.data() + start + offset, expr);
+        std::wcregex_iterator end;
+
+        int64_t start_idx = 0;
+        while (it != end) {
+            std::wcmatch match = *it;
+            if (match.position() > start_idx) {
+                bpe_offsets.emplace_back(match.position() - start_idx);
+            }
+            bpe_offsets.emplace_back(match.length());
+            start_idx = match.position() + match.length();
+            ++it;
+        }
+
+        if (start_idx < (int64_t) offset) {
+            bpe_offsets.emplace_back(offset - start_idx);
+        }
+        start += offset;
+    }
+
+    return bpe_offsets;
+}
+
+// use std::regex to split the text
+static std::vector<size_t> unicode_regex_preprocess(const std::string & text, const std::vector<size_t> & offsets, const std::string & regex_expr) {
+    std::regex expr(regex_expr);
+    std::vector<size_t> bpe_offsets; // store the offset of each word
+    bpe_offsets.reserve(offsets.size()); // Reserve memory for the approximate size
+    size_t start = 0;
+    for (auto offset : offsets) {
+        std::cregex_iterator it(text.data() + start, text.data() + start + offset, expr);
+        std::cregex_iterator end;
+
+        int64_t start_idx = 0;
+        while (it != end) {
+            std::cmatch match = *it;
+            if (match.position() > start_idx) {
+                bpe_offsets.emplace_back(match.position() - start_idx);
+            }
+            bpe_offsets.emplace_back(match.length());
+            start_idx = match.position() + match.length();
+            ++it;
+        }
+
+        if (start_idx < (int64_t) offset) {
+            bpe_offsets.emplace_back(offset - start_idx);
+        }
+        start += offset;
+    }
+
+    return bpe_offsets;
+}
+
+static bool unicode_regex_with_custom_preprocessor_exists(const std::string & regex) {
+    return unicode_regex_with_custom_preprocessor.find(regex) != unicode_regex_with_custom_preprocessor.end();
+}
+
+static std::vector<size_t> unicode_regex_custom_preprocess(const std::string & regex, const std::string & text, const std::vector<size_t> & offsets) {
+    std::vector<size_t> bpe_offsets;
+
+    if (regex == "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)") {
+        bpe_offsets = unicode_gpt2_regex_preprocess(text, offsets);
+    }
+
+    return bpe_offsets;
+}
+
 //
 // interface
 //
@@ -274,4 +516,168 @@ uint8_t unicode_utf8_to_byte(const std::string & utf8) {
 char32_t unicode_tolower(char32_t cp) {
     auto it = unicode_map_lowercase.find(cp);
     return it == unicode_map_lowercase.end() ? cp : it->second;
+}
+
+static void replace_all(std::string & s, const std::string & search, const std::string & replace) {
+    std::string result;
+    for (size_t pos = 0; ; pos += search.length()) {
+        auto new_pos = s.find(search, pos);
+        if (new_pos == std::string::npos) {
+            result += s.substr(pos, s.size() - pos);
+            break;
+        }
+        result += s.substr(pos, new_pos - pos) + replace;
+        pos = new_pos;
+    }
+    s = std::move(result);
+}
+
+std::vector<std::string> unicode_regex_split(const std::string & text, const std::vector<std::string> & regex_exprs) {
+    // unicode categories
+    static const std::map<std::string, int> k_ucat_enum = {
+        { "\\p{N}", CODEPOINT_TYPE_DIGIT },
+        { "\\p{L}", CODEPOINT_TYPE_LETTER },
+        { "\\p{P}", CODEPOINT_TYPE_PUNCTUATION },
+    };
+
+    static const std::map<int, int> k_ucat_cpt = {
+        { CODEPOINT_TYPE_DIGIT,         0xD1 },
+        { CODEPOINT_TYPE_LETTER,        0xD2 },
+        { CODEPOINT_TYPE_PUNCTUATION,   0xD3 },
+    };
+
+    static const std::map<int, std::string> k_ucat_map = {
+        { CODEPOINT_TYPE_DIGIT,         "\x30-\x39" },
+        { CODEPOINT_TYPE_LETTER,        "\x41-\x5A\x61-\x7A" },
+        { CODEPOINT_TYPE_PUNCTUATION,   "\x21-\x23\x25-\x2A\x2C-\x2F\x3A-\x3B\x3F-\x40\\\x5B-\\\x5D\x5F\\\x7B\\\x7D" },
+    };
+
+    // compute collapsed codepoints only if needed by at least one regex
+    bool need_collapse = false;
+    for (auto & regex_expr : regex_exprs) {
+        // search for unicode categories
+        for (auto & ucat : k_ucat_enum) {
+            if (std::string::npos != regex_expr.find(ucat.first)) {
+                need_collapse = true;
+                break;
+            }
+        }
+    }
+
+    std::string text_collapsed;
+    if (need_collapse) {
+        // collapse all unicode categories
+        const auto cpts = unicode_cpts_from_utf8(text);
+        text_collapsed.resize(cpts.size());
+
+        for (size_t i = 0; i < cpts.size(); ++i) {
+            // keep single-byte codepoints as is
+            if (cpts[i] < 128) {
+                text_collapsed[i] = cpts[i];
+                continue;
+            }
+
+            const int cpt_type = unicode_cpt_type(cpts[i]);
+
+            if (k_ucat_cpt.find(cpt_type) != k_ucat_cpt.end()) {
+                text_collapsed[i] = k_ucat_cpt.at(cpt_type);
+            } else {
+                text_collapsed[i] = (char) 0xD0; // fallback
+            }
+        }
+    }
+
+    const auto cpts = unicode_cpts_from_utf8(text);
+    std::vector<size_t> bpe_offsets = { cpts.size() };
+
+    for (auto & regex_expr : regex_exprs) {
+        if (unicode_regex_with_custom_preprocessor_exists(regex_expr)) {
+            bpe_offsets = unicode_regex_custom_preprocess(regex_expr, text, bpe_offsets);
+        } else {
+            // fallback
+            try {
+                // if a unicode category is used in the regex, we use the collapsed text and replace the unicode category
+                // with the corresponding collapsed representation
+                bool use_collapsed = false;
+                for (auto & ucat : k_ucat_enum) {
+                    if (std::string::npos != regex_expr.find(ucat.first)) {
+                        use_collapsed = true;
+                        break;
+                    }
+                }
+
+                if (use_collapsed) {
+                    std::string regex_expr_collapsed;
+
+                    // track if we are inside []
+                    bool inside = false;
+                    for (size_t i = 0; i < regex_expr.size(); ++i) {
+                        if (regex_expr[i] == '[' && (i == 0 || regex_expr[i - 1] != '\\')) {
+                            regex_expr_collapsed += '[';
+                            inside = true;
+                            continue;
+                        } else if (inside && regex_expr[i] == ']' && regex_expr[i - 1] != '\\') {
+                            regex_expr_collapsed += ']';
+                            inside = false;
+                            continue;
+                        }
+                        if (regex_expr[i] == '\\' && i + 1 < regex_expr.size()) {
+                            if (regex_expr[i + 1] == 'p') {
+                                if (i + 3 < regex_expr.size() && regex_expr[i + 2] == '{') {
+                                    if (regex_expr[i + 4] == '}') {
+                                        const std::string pat = regex_expr.substr(i, 5);
+                                        if (k_ucat_enum.find(pat) != k_ucat_enum.end()) {
+                                            if (!inside) {
+                                                regex_expr_collapsed += '[';
+                                            }
+                                            regex_expr_collapsed += k_ucat_cpt.at(k_ucat_enum.at(pat));
+                                            regex_expr_collapsed += k_ucat_map.at(k_ucat_enum.at(pat));
+                                            if (!inside) {
+                                                regex_expr_collapsed += ']';
+                                            }
+                                            i += 4;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        regex_expr_collapsed += regex_expr[i];
+                    }
+
+                    //printf("text_collapsed: %s\n", text_collapsed.c_str());
+                    //printf("regex_expr_collapsed: %s\n", regex_expr_collapsed.c_str());
+                    bpe_offsets = unicode_regex_preprocess(text_collapsed, bpe_offsets, regex_expr_collapsed);
+                } else {
+                    // no unicode category used, we can use std::wregex directly
+                    const std::wstring wtext       = unicode_wstring_from_utf8(text);
+                    const std::wstring wregex_expr = unicode_wstring_from_utf8(regex_expr);
+
+                    //printf("text: %s\n", text.c_str());
+                    //printf("regex_expr: %s\n", regex_expr.c_str());
+                    bpe_offsets = unicode_regex_preprocess(wtext, bpe_offsets, wregex_expr);
+                }
+            } catch (std::regex_error & e) {
+                fprintf(stderr, "Failed to process regex: '%s'\n", regex_expr.c_str());
+                fprintf(stderr, "Regex error: %s\n", e.what());
+                throw std::runtime_error("Failed to process regex");
+            }
+        }
+    }
+
+    std::vector<std::string> bpe_words;
+    bpe_words.reserve(bpe_offsets.size()); // Reserve memory for the approximate size
+
+    size_t start = 0;
+    for (size_t & offset : bpe_offsets) {
+        //bpe_words.emplace_back(unicode_wstring_to_utf8(std::wstring(wtext, start, offset)));
+        bpe_words.emplace_back();
+        for (size_t i = start; i < start + offset; ++i) {
+            bpe_words.back() += unicode_cpt_to_utf8(cpts[i]);
+        }
+        start += offset;
+    }
+
+    return unicode_byte_encoding_process(bpe_words);
 }

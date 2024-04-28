@@ -215,6 +215,76 @@ class Model(ABC):
         except KeyError:
             raise NotImplementedError(f'Architecture {arch!r} not supported!') from None
 
+    # @staticmethod
+    # def from_model_architecture(model_architecture):
+    #     if model_architecture == "GPTNeoXForCausalLM":
+    #         return GPTNeoXModel
+    #     if model_architecture == "BloomForCausalLM":
+    #         return BloomModel
+    #     if model_architecture == "MPTForCausalLM":
+    #         return MPTModel
+    #     if model_architecture in ("BaichuanForCausalLM", "BaiChuanForCausalLM"):
+    #         return BaichuanModel
+    #     if model_architecture in ("FalconForCausalLM", "RWForCausalLM"):
+    #         return FalconModel
+    #     if model_architecture == "GPTBigCodeForCausalLM":
+    #         return StarCoderModel
+    #     if model_architecture == "GPTRefactForCausalLM":
+    #         return RefactModel
+    #     if model_architecture == "PersimmonForCausalLM":
+    #         return PersimmonModel
+    #     if model_architecture == "LlamaForCausalLM":
+    #         return LlamaModel
+    #     if model_architecture in ("StableLMEpochForCausalLM", "LlavaStableLMEpochForCausalLM"):
+    #         return StableLMModel
+    #     if model_architecture == "QWenLMHeadModel":
+    #         return QwenModel
+    #     if model_architecture == "Qwen2ForCausalLM":
+    #         return Model
+    #     if model_architecture == "MixtralForCausalLM":
+    #         return MixtralModel
+    #     if model_architecture == "GPT2LMHeadModel":
+    #         return GPT2Model
+    #     if model_architecture == "PhiForCausalLM":
+    #         return Phi2Model
+    #     if model_architecture == "PlamoForCausalLM":
+    #         return PlamoModel
+    #     if model_architecture == "CodeShellForCausalLM":
+    #         return CodeShellModel
+    #     if model_architecture == "OrionForCausalLM":
+    #         return OrionModel
+    #     if model_architecture == "InternLM2ForCausalLM":
+    #         return InternLM2Model
+    #     if model_architecture == "MiniCPMForCausalLM":
+    #         return MiniCPMModel
+    #     if model_architecture == "BertModel":
+    #         return BertModel
+
+    @staticmethod
+    def from_model_name(model_name: str):
+        model_name_lower = model_name.lower()
+        if model_name_lower in ("stablelmepoch", "llavastablelmepoch"):
+            return StableLMModel
+        if model_name_lower == "gptneox":
+            return GPTNeoXModel
+        if model_name_lower == "bloom":
+            return BloomModel
+        if model_name_lower == "mpt":
+            return MPTModel
+        if model_name_lower in ("baichuan"):
+            return BaichuanModel
+        if model_name_lower in ("falcon", "rw"):
+            return FalconModel
+        if model_name_lower == "gptbigcode":
+            return StarCoderModel
+        if model_name_lower == "gptrefact":
+            return RefactModel
+        if model_name_lower == "persimmon":
+            return PersimmonModel
+        if model_name_lower in ("llama", "deepseekcoder", "deepseekllm"):
+            return LlamaModel
+        return Model
+
     def _is_model_safetensors(self) -> bool:
         return Model.count_model_parts(self.dir_model, ".safetensors") > 0
 
@@ -228,8 +298,55 @@ class Model(ABC):
             return ("pytorch_model.bin",)
         return (f"pytorch_model-{n:05}-of-{self.num_parts:05}.bin" for n in range(1, self.num_parts + 1))
 
+    def _get_model_architecture(self) -> gguf.MODEL_ARCH:
+        arch = self.hparams["architectures"][0]
+        if arch == "GPTNeoXForCausalLM":
+            return gguf.MODEL_ARCH.GPTNEOX
+        if arch == "BloomForCausalLM":
+            return gguf.MODEL_ARCH.BLOOM
+        if arch == "MPTForCausalLM":
+            return gguf.MODEL_ARCH.MPT
+        if arch in ("BaichuanForCausalLM", "BaiChuanForCausalLM"):
+            return gguf.MODEL_ARCH.BAICHUAN
+        if arch in ("FalconForCausalLM", "RWForCausalLM"):
+            return gguf.MODEL_ARCH.FALCON
+        if arch == "GPTBigCodeForCausalLM":
+            return gguf.MODEL_ARCH.STARCODER
+        if arch == "GPTRefactForCausalLM":
+            return gguf.MODEL_ARCH.REFACT
+        if arch == "PersimmonForCausalLM":
+            return gguf.MODEL_ARCH.PERSIMMON
+        if arch == "LlamaForCausalLM":
+            return gguf.MODEL_ARCH.LLAMA
+        if arch in ("StableLMEpochForCausalLM", "LlavaStableLMEpochForCausalLM"):
+            return gguf.MODEL_ARCH.STABLELM
+        if arch == "QWenLMHeadModel":
+            return gguf.MODEL_ARCH.QWEN
+        if arch == "Qwen2ForCausalLM":
+            return gguf.MODEL_ARCH.QWEN2
+        if arch == "MixtralForCausalLM":
+            return gguf.MODEL_ARCH.LLAMA
+        if arch == "GPT2LMHeadModel":
+            return gguf.MODEL_ARCH.GPT2
+        if arch == "PhiForCausalLM":
+            return gguf.MODEL_ARCH.PHI2
+        if arch == "PlamoForCausalLM":
+            return gguf.MODEL_ARCH.PLAMO
+        if arch == "CodeShellForCausalLM":
+            return gguf.MODEL_ARCH.CODESHELL
+        if arch == "OrionForCausalLM":
+            return gguf.MODEL_ARCH.ORION
+        if arch == "InternLM2ForCausalLM":
+            return gguf.MODEL_ARCH.INTERNLM2
+        if arch == "MiniCPMForCausalLM":
+            return gguf.MODEL_ARCH.MINICPM
+        if arch == "BertModel":
+            return gguf.MODEL_ARCH.BERT
+
+        raise NotImplementedError(f'Architecture "{arch}" not supported!')
+
     # used for GPT-2 BPE and WordPiece vocabs
-    def get_basic_vocab(self) -> tuple[list[str], list[int]]:
+    def get_vocab_base(self) -> tuple[list[str], list[int], str]:
         tokens: list[str] = []
         toktypes: list[int] = []
 
@@ -237,6 +354,8 @@ class Model(ABC):
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
         vocab_size = self.hparams.get("vocab_size", len(tokenizer.vocab))
         assert max(tokenizer.vocab.values()) < vocab_size
+
+        tokpre = self.get_vocab_base_pre(tokenizer)
 
         reverse_vocab = {id_: encoded_tok for encoded_tok, id_ in tokenizer.vocab.items()}
         added_vocab = tokenizer.get_added_vocab()
@@ -255,11 +374,46 @@ class Model(ABC):
                 tokens.append(reverse_vocab[i])
                 toktypes.append(gguf.TokenType.NORMAL)
 
-        return tokens, toktypes
+        return tokens, toktypes, tokpre
+
+    def get_vocab_base_pre(self, tokenizer) -> str:
+        # encoding this string and hashing the resulting tokens would (hopefully) give us a unique identifier that
+        # is specific for the BPE pre-tokenizer used by the model
+        # we will use this unique identifier to write a "tokenizer.ggml.pre" entry in the GGUF file which we can
+        # use in llama.cpp to implement the same pre-tokenizer
+
+        chktxt = "\n \n\n \n\n\n \t \t\t \t\n  \n   \n    \n     \n🚀 (normal) 😶‍🌫️ (multiple emojis concatenated) ✅ 🦙🦙 3 33 333 3333 33333 333333 3333333 33333333 3.3 3..3 3...3 កាន់តែពិសេសអាច😁 ?我想在apple工作1314151天～ ------======= нещо на Български what's ''''''```````\"\"\"\"......!!!!!!??????"
+
+        chktok = tokenizer.encode(chktxt)
+        chkhsh = hash(tuple(chktok))
+
+        print(f"chktok: {chktok}")
+        print(f"chkhsh: {chkhsh}")
+
+        res = None
+
+        # NOTE: if you get an error here, you need to add the model to the if-elif chain below
+        #       observe the stdout for the chkhsh value and add it to the chain
+        if self.model_arch == gguf.MODEL_ARCH.LLAMA:
+            if chkhsh == -3290901550109860290:
+                # ref: https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct/blob/main/tokenizer.json
+                res = "llama3"
+            if chkhsh ==  5332289095291046364:
+                # ref: https://huggingface.co/deepseek-ai/deepseek-llm-7b-chat/blob/main/tokenizer.json
+                res = "deepseek-llm"
+            if chkhsh ==  4190561703949727616:
+                # ref: https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-instruct/blob/main/tokenizer.json
+                res = "deepseek-coder"
+
+        if res is None:
+            raise NotImplementedError("BPE pre-tokenizer was not recognized - update get_vocab_base_pre()")
+
+        return res
 
     def _set_vocab_gpt2(self) -> None:
-        tokens, toktypes = self.get_basic_vocab()
+        tokens, toktypes, tokpre = self.get_vocab_base()
         self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
 
@@ -276,6 +430,8 @@ class Model(ABC):
         tokenizer = AutoTokenizer.from_pretrained(dir_model, trust_remote_code=True)
         vocab_size = hparams["vocab_size"]
         assert max(tokenizer.get_vocab().values()) < vocab_size
+
+        tokpre = self.get_vocab_base_pre(tokenizer)
 
         merges = []
         vocab = {}
@@ -304,6 +460,7 @@ class Model(ABC):
                 toktypes.append(gguf.TokenType.NORMAL)
 
         self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
 
@@ -376,6 +533,7 @@ class Model(ABC):
         assert len(tokens) == vocab_size
 
         self.gguf_writer.add_tokenizer_model("llama")
+        self.gguf_writer.add_tokenizer_pre("default")
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_scores(scores)
         self.gguf_writer.add_token_types(toktypes)
@@ -397,6 +555,7 @@ class Model(ABC):
         assert len(tokens) == vocab.vocab_size
 
         self.gguf_writer.add_tokenizer_model("llama")
+        self.gguf_writer.add_tokenizer_pre("default")
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_scores(scores)
         self.gguf_writer.add_token_types(toktypes)
@@ -840,6 +999,7 @@ class XverseModel(Model):
             toktypes.append(toktype)
 
         self.gguf_writer.add_tokenizer_model("llama")
+        self.gguf_writer.add_tokenizer_pre("default")
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
 
@@ -1334,6 +1494,11 @@ class LlamaModel(Model):
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(hparams["vocab_size"])
         self.gguf_writer.add_rope_dimension_count(hparams["hidden_size"] // hparams["num_attention_heads"])
+
+        if self.hparams.get("rope_scaling") is not None and "factor" in self.hparams["rope_scaling"]:
+            if self.hparams["rope_scaling"].get("type") == "linear":
+                self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+                self.gguf_writer.add_rope_scaling_factor(self.hparams["rope_scaling"]["factor"])
 
     # Same as super class, but permuting q_proj, k_proj
     def write_tensors(self):
@@ -2052,6 +2217,7 @@ class Phi3MiniModel(Model):
                     toktypes[token_id] = SentencePieceTokenTypes.USER_DEFINED
 
         self.gguf_writer.add_tokenizer_model("llama")
+        self.gguf_writer.add_tokenizer_pre("default")
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_scores(scores)
         self.gguf_writer.add_token_types(toktypes)
@@ -2294,6 +2460,7 @@ class InternLM2Model(Model):
                     toktypes.append(SentencePieceTokenTypes.USER_DEFINED)
 
         self.gguf_writer.add_tokenizer_model("llama")
+        self.gguf_writer.add_tokenizer_pre("default")
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_scores(scores)
         self.gguf_writer.add_token_types(toktypes)
@@ -2443,7 +2610,7 @@ class BertModel(Model):
             self.gguf_writer.add_pooling_type(pooling_type)
 
     def set_vocab(self):
-        tokens, toktypes = self.get_basic_vocab()
+        tokens, toktypes, tokpre = self.get_vocab_base()
         self.vocab_size = len(tokens)
 
         # we need this to validate the size of the token_type embeddings
@@ -2461,6 +2628,7 @@ class BertModel(Model):
 
         # add vocab to gguf
         self.gguf_writer.add_tokenizer_model("bert")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
 
@@ -2637,6 +2805,9 @@ class MambaModel(Model):
 
             field = neox_reader.get_field(gguf.Keys.Tokenizer.MODEL)
             self.gguf_writer.add_tokenizer_model(bytes(field.parts[-1]))
+
+            field = neox_reader.get_field(gguf.Keys.Tokenizer.PRE)
+            self.gguf_writer.add_tokenizer_pre(bytes(field.parts[-1]))
 
             field = neox_reader.get_field(gguf.Keys.Tokenizer.LIST)
             self.gguf_writer.add_token_list([bytes(field.parts[i]) for i in field.data][:vocab_size])
@@ -2843,6 +3014,7 @@ def parse_args() -> argparse.Namespace:
         help="directory containing model file",
     )
     parser.add_argument("--use-temp-file", action="store_true", help="use the tempfile library while processing (helpful when running out of memory, process killed)")
+    parser.add_argument("--model-name", type=str, default=None, help="name of the model")
 
     return parser.parse_args()
 
