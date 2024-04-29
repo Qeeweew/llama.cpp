@@ -3131,9 +3131,17 @@ struct llama_model_loader {
 
         fver = (enum llama_fver) gguf_get_version(meta);
 
+        std::set<std::string> tensor_names;
         for (auto & w : weights) {
             n_elements += ggml_nelements(w.tensor);
             n_bytes    += ggml_nbytes(w.tensor);
+            // make sure there is no duplicated tensor names
+            const std::string name(w.tensor->name);
+            auto found = tensor_names.find(name);
+            if (found != tensor_names.end()) {
+                throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", w.tensor->name));
+            }
+            tensor_names.insert(name);
         }
 
         LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
@@ -4342,13 +4350,20 @@ static void llm_load_vocab(
         if (vocab.type == LLAMA_VOCAB_TYPE_BPE) {
             if (tokenizer_pre.empty()) {
                 LLAMA_LOG_WARN("%s: missing pre-tokenizer type, using: 'default'\n", __func__);
+                LLAMA_LOG_WARN("%s:                                             \n", __func__);
+                LLAMA_LOG_WARN("%s: ************************************        \n", __func__);
+                LLAMA_LOG_WARN("%s: GENERATION QUALITY WILL BE DEGRADED!        \n", __func__);
+                LLAMA_LOG_WARN("%s: CONSIDER REGENERATING THE MODEL             \n", __func__);
+                LLAMA_LOG_WARN("%s: ************************************        \n", __func__);
+                LLAMA_LOG_WARN("%s:                                             \n", __func__);
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_DEFAULT;
             } else if (
                     tokenizer_pre == "default") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_DEFAULT;
             } else if (
-                    tokenizer_pre == "llama3" ||
-                    tokenizer_pre == "llama-v3") {
+                    tokenizer_pre == "llama3"   ||
+                    tokenizer_pre == "llama-v3" ||
+                    tokenizer_pre == "llama-bpe") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_LLAMA3;
             } else if (
                     tokenizer_pre == "deepseek-llm") {
@@ -4359,6 +4374,15 @@ static void llm_load_vocab(
             } else if (
                     tokenizer_pre == "falcon") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_FALCON;
+            } else if (
+                    tokenizer_pre == "mpt") {
+                vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_MPT;
+            } else if (
+                    tokenizer_pre == "starcoder") {
+                vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_STARCODER;
+            } else if (
+                    tokenizer_pre == "gpt-2") {
+                vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_GPT2;
             } else {
                 throw std::runtime_error(format("unknown pre-tokenizer type: '%s'", tokenizer_pre.c_str()));
             }
@@ -12199,6 +12223,23 @@ struct llm_tokenizer_bpe {
                             "[0-9][0-9][0-9]",
                         });
                         break;
+                    case LLAMA_VOCAB_PRE_TYPE_MPT:
+                        // TODO: MPT pre-tokenization regexes are unknown
+                        //       the following are close, but not exact. run the following:
+                        //       ./bin/test-tokenizer-0 ../models/ggml-vocab-mpt.gguf
+                        GGML_ASSERT("MPT pre-tokenization regexes are unknown - fixes needed");
+                        word_collection = unicode_regex_split(text, {
+                            "\\s?\\p{L}+",
+                            "\\s?\\p{P}+",
+                            "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+                        });
+                        break;
+                    case LLAMA_VOCAB_PRE_TYPE_STARCODER:
+                    case LLAMA_VOCAB_PRE_TYPE_GPT2:
+                        word_collection = unicode_regex_split(text, {
+                            "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+                        });
+                        break;
                     default:
                         // default regex for BPE tokenization pre-processing
                         word_collection = unicode_regex_split(text, {
@@ -12659,7 +12700,7 @@ static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & 
             } break;
         case LLAMA_VOCAB_TYPE_BPE:
             {
-                if (add_special && vocab.special_add_bos == 1) {
+                if (add_special && vocab.special_add_bos != 0) {
                     GGML_ASSERT(vocab.special_bos_id != -1);
                     output.push_back(vocab.special_bos_id);
                 }
@@ -17841,9 +17882,9 @@ const char * llama_print_system_info(void) {
     s += "VSX = "         + std::to_string(ggml_cpu_has_vsx())         + " | ";
     s += "MATMUL_INT8 = " + std::to_string(ggml_cpu_has_matmul_int8()) + " | ";
 #ifdef GGML_USE_LLAMAFILE
-    s += "LAMMAFILE = 1 | ";
+    s += "LLAMAFILE = 1 | ";
 #else
-    s += "LAMMAFILE = 0 | ";
+    s += "LLAMAFILE = 0 | ";
 #endif
 
     return s.c_str();

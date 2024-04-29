@@ -20,13 +20,9 @@ TEST_TARGETS = \
 	tests/test-quantize-perf \
 	tests/test-rope \
 	tests/test-sampling \
-	tests/test-tokenizer-0-deepseek-coder \
-	tests/test-tokenizer-0-deepseek-llm \
-	tests/test-tokenizer-0-falcon \
-	tests/test-tokenizer-0-llama \
-	tests/test-tokenizer-0-llama-v3 \
+	tests/test-tokenizer-0 \
 	tests/test-tokenizer-1-bpe \
-	tests/test-tokenizer-1-llama
+	tests/test-tokenizer-1-spm
 
 # Code coverage output files
 COV_TARGETS = *.gcno tests/*.gcno *.gcda tests/*.gcda *.gcov tests/*.gcov lcov-report gcovr-report
@@ -41,6 +37,17 @@ endif
 
 ifndef UNAME_M
 UNAME_M := $(shell uname -m)
+endif
+
+# In GNU make default CXX is g++ instead of c++.  Let's fix that so that users
+# of non-gcc compilers don't have to provide g++ alias or wrapper.
+DEFCC  := cc
+DEFCXX := c++
+ifeq ($(origin CC),default)
+CC  := $(DEFCC)
+endif
+ifeq ($(origin CXX),default)
+CXX := $(DEFCXX)
 endif
 
 # Mac OS + Arm can report x86_64
@@ -65,17 +72,17 @@ default: $(BUILD_TARGETS)
 test: $(TEST_TARGETS)
 	@failures=0; \
 	for test_target in $(TEST_TARGETS); do \
-		if [ "$$test_target" = "tests/test-tokenizer-0-llama" ]; then \
-			./$$test_target $(CURDIR)/models/ggml-vocab-llama.gguf; \
-		elif [ "$$test_target" = "tests/test-tokenizer-0-llama-v3" ]; then \
-			./$$test_target $(CURDIR)/models/ggml-vocab-llama-v3.gguf; \
-		elif [ "$$test_target" = "tests/test-tokenizer-0-falcon" ]; then \
+		if [ "$$test_target" = "tests/test-tokenizer-0" ]; then \
+			./$$test_target $(CURDIR)/models/ggml-vocab-llama-spm.gguf; \
+			./$$test_target $(CURDIR)/models/ggml-vocab-llama-bpe.gguf; \
+			./$$test_target $(CURDIR)/models/ggml-vocab-phi-3.gguf; \
 			./$$test_target $(CURDIR)/models/ggml-vocab-falcon.gguf; \
-		elif [ "$$test_target" = "tests/test-tokenizer-0-deepseek-coder" ]; then \
 			./$$test_target $(CURDIR)/models/ggml-vocab-deepseek-coder.gguf; \
-		elif [ "$$test_target" = "tests/test-tokenizer-0-deepseek-llm" ]; then \
 			./$$test_target $(CURDIR)/models/ggml-vocab-deepseek-llm.gguf; \
-		elif [ "$$test_target" = "tests/test-tokenizer-1-llama" ]; then \
+			./$$test_target $(CURDIR)/models/ggml-vocab-bert-bge.gguf; \
+			./$$test_target $(CURDIR)/models/ggml-vocab-starcoder.gguf; \
+			./$$test_target $(CURDIR)/models/ggml-vocab-gpt-2.gguf; \
+		elif [ "$$test_target" = "tests/test-tokenizer-1-spm" ]; then \
 			continue; \
 		elif [ "$$test_target" = "tests/test-tokenizer-1-bpe" ]; then \
 			continue; \
@@ -1001,21 +1008,11 @@ tests/test-tokenizer-0-llama: tests/test-tokenizer-0-llama.cpp ggml.o llama.o $(
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
-tests/test-tokenizer-0-llama-v3: tests/test-tokenizer-0-llama-v3.cpp ggml.o llama.o $(COMMON_DEPS) console.o $(OBJS)
-	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
-
-tests/test-tokenizer-0-deepseek-coder: tests/test-tokenizer-0-deepseek-coder.cpp ggml.o llama.o $(COMMON_DEPS) $(OBJS)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
-
-tests/test-tokenizer-0-deepseek-llm: tests/test-tokenizer-0-deepseek-llm.cpp ggml.o llama.o $(COMMON_DEPS) $(OBJS)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
-
 tests/test-tokenizer-1-bpe: tests/test-tokenizer-1-bpe.cpp ggml.o llama.o $(COMMON_DEPS) console.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
-tests/test-tokenizer-1-llama: tests/test-tokenizer-1-llama.cpp ggml.o llama.o $(COMMON_DEPS) console.o $(OBJS)
+tests/test-tokenizer-1-spm: tests/test-tokenizer-1-spm.cpp ggml.o llama.o $(COMMON_DEPS) console.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 

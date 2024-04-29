@@ -283,7 +283,7 @@ class Model(ABC):
         #       don't do this manually - use the convert-hf-to-gguf-update.py script!
         if chkhsh == "0ef9807a4087ebef797fc749390439009c3b9eda9ad1a097abbe738f486c01e5":
             # ref: https://huggingface.co/meta-llama/Meta-Llama-3-8B
-            res = "llama-v3"
+            res = "llama-bpe"
         if chkhsh == "049ecf7629871e3041641907f3de7c733e4dbfdc736f57d882ba0b0845599754":
             # ref: https://huggingface.co/deepseek-ai/deepseek-llm-7b-base
             res = "deepseek-llm"
@@ -296,17 +296,26 @@ class Model(ABC):
         if chkhsh == "0876d13b50744004aa9aeae05e7b0647eac9d801b5ba4668afc01e709c15e19f":
             # ref: https://huggingface.co/BAAI/bge-small-en-v1.5
             res = "bert-bge"
+        if chkhsh == "b6dc8df998e1cfbdc4eac8243701a65afe638679230920b50d6f17d81c098166":
+            # ref: https://huggingface.co/mosaicml/mpt-7b
+            res = "mpt"
+        if chkhsh == "35d91631860c815f952d711435f48d356ebac988362536bed955d43bfa436e34":
+            # ref: https://huggingface.co/bigcode/starcoder2-3b
+            res = "starcoder"
+        if chkhsh == "3ce83efda5659b07b1ad37ca97ca5797ea4285d9b9ab0dc679e4a720c9da7454":
+            # ref: https://huggingface.co/openai-community/gpt2
+            res = "gpt-2"
 
         if res is None:
-            print( "\n")
-            print( "**************************************************************************************")
-            print( "** WARNING: The BPE pre-tokenizer was not recognized!")
-            print( "**          This means that it was not added yet or you are using an older version.")
-            print( "**          Check convert-hf-to-gguf-update.py and update it accordingly.")
-            print( "**")
+            print("\n")
+            print("**************************************************************************************")
+            print("** WARNING: The BPE pre-tokenizer was not recognized!")
+            print("**          This means that it was not added yet or you are using an older version.")
+            print("**          Check convert-hf-to-gguf-update.py and update it accordingly.")
+            print("**")
             print(f"** chkhsh:  {chkhsh}")
-            print( "**************************************************************************************")
-            print( "\n")
+            print("**************************************************************************************")
+            print("\n")
             raise NotImplementedError("BPE pre-tokenizer was not recognized - update get_vocab_base_pre()")
 
         print(f"tokenizer.ggml.pre: {res}")
@@ -2553,6 +2562,10 @@ class BertModel(Model):
             if new_name is None:
                 print(f"Can not map tensor {name!r}")
                 sys.exit()
+
+            # convert any unsupported data types to float32
+            if data_torch.dtype not in (torch.float16, torch.float32):
+                data_torch = data_torch.to(torch.float32)
 
             data = data_torch.squeeze().numpy()
             n_dims = len(data.shape)

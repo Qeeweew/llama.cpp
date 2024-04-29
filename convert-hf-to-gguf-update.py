@@ -46,12 +46,16 @@ else:
 
 # TODO: add models here, base models preferred
 models = [
-        { "name": "llama-v2",       "tokt": TOKENIZER_TYPE.SPM, "repo": "https://huggingface.co/meta-llama/Llama-2-7b-hf",                },
-        { "name": "llama-v3",       "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/meta-llama/Meta-Llama-3-8B",              },
-        { "name": "deepseek-llm",   "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/deepseek-ai/deepseek-llm-7b-base",        },
-        { "name": "deepseek-coder", "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-base",    },
-        { "name": "falcon",         "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/tiiuae/falcon-7b",                        },
-        { "name": "bert-bge",       "tokt": TOKENIZER_TYPE.WPM, "repo": "https://huggingface.co/BAAI/bge-small-en-v1.5",                  },
+        { "name": "llama-spm",      "tokt": TOKENIZER_TYPE.SPM, "repo": "https://huggingface.co/meta-llama/Llama-2-7b-hf", },
+        { "name": "llama-bpe",      "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/meta-llama/Meta-Llama-3-8B", },
+        { "name": "phi-3",          "tokt": TOKENIZER_TYPE.SPM, "repo": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct", },
+        { "name": "deepseek-llm",   "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/deepseek-ai/deepseek-llm-7b-base", },
+        { "name": "deepseek-coder", "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-base", },
+        { "name": "falcon",         "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/tiiuae/falcon-7b", },
+        { "name": "bert-bge",       "tokt": TOKENIZER_TYPE.WPM, "repo": "https://huggingface.co/BAAI/bge-small-en-v1.5", },
+        { "name": "mpt",            "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/mosaicml/mpt-7b", },
+        { "name": "starcoder",      "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/bigcode/starcoder2-3b", },
+        { "name": "gpt-2",          "tokt": TOKENIZER_TYPE.BPE, "repo": "https://huggingface.co/openai-community/gpt2", },
         ]
 
 # make directory "models/tokenizers" if it doesn't exist
@@ -64,10 +68,11 @@ def download_file_with_auth(url, token, save_path):
     if response.status_code == 200:
         with open(save_path, 'wb') as f:
             f.write(response.content)
-        print("File downloaded successfully.")
+        print(f"File {save_path} downloaded successfully")
     else:
         print(f"Failed to download file. Status code: {response.status_code}")
 
+# download the tokenizer models
 for model in models:
     name = model["name"]
     repo = model["repo"]
@@ -80,6 +85,10 @@ for model in models:
         continue
 
     print(f"Downloading {name} to models/tokenizers/{name}")
+
+    url = f"{repo}/raw/main/config.json"
+    save_path = f"models/tokenizers/{name}/config.json"
+    download_file_with_auth(url, token, save_path)
 
     url = f"{repo}/raw/main/tokenizer.json"
     save_path = f"models/tokenizers/{name}/tokenizer.json"
@@ -151,15 +160,15 @@ src_func +=  "        # NOTE: if you get an error here, you need to add the mode
 src_func +=  "        #       don't do this manually - use the convert-hf-to-gguf-update.py script!\n"
 src_func += f"{src_ifs}\n"
 src_func +=  "        if res is None:\n"
-src_func +=  "            print( \"\\n\")\n"
-src_func +=  "            print( \"**************************************************************************************\")\n"
-src_func +=  "            print( \"** WARNING: The BPE pre-tokenizer was not recognized!\")\n"
-src_func +=  "            print( \"**          This means that it was not added yet or you are using an older version.\")\n"
-src_func +=  "            print( \"**          Check convert-hf-to-gguf-update.py and update it accordingly.\")\n"
-src_func +=  "            print( \"**\")\n"
+src_func +=  "            print(\"\\n\")\n"
+src_func +=  "            print(\"**************************************************************************************\")\n"
+src_func +=  "            print(\"** WARNING: The BPE pre-tokenizer was not recognized!\")\n"
+src_func +=  "            print(\"**          This means that it was not added yet or you are using an older version.\")\n"
+src_func +=  "            print(\"**          Check convert-hf-to-gguf-update.py and update it accordingly.\")\n"
+src_func +=  "            print(\"**\")\n"
 src_func +=  "            print(f\"** chkhsh:  {chkhsh}\")\n"
-src_func +=  "            print( \"**************************************************************************************\")\n"
-src_func +=  "            print( \"\\n\")\n"
+src_func +=  "            print(\"**************************************************************************************\")\n"
+src_func +=  "            print(\"\\n\")\n"
 src_func +=  "            raise NotImplementedError(\"BPE pre-tokenizer was not recognized - update get_vocab_base_pre()\")\n"
 src_func +=  "\n"
 src_func +=  "        print(f\"tokenizer.ggml.pre: {res}\")\n"
@@ -173,3 +182,94 @@ print("\n")
 print("!!! Copy-paste the function above into convert-hf-to-gguf.py !!!")
 print("\n")
 
+# generate tests for each tokenizer model
+
+tests = [
+    "",
+    " ",
+    "  ",
+    "   ",
+    "\t",
+    "\n",
+    "\n\n",
+    "\n\n\n",
+    "\t\n",
+    "Hello world",
+    " Hello world",
+    "Hello World",
+    " Hello World",
+    " Hello World!",
+    "Hello, world!",
+    " Hello, world!",
+    " this is 🦙.cpp",
+    "w048 7tuijk dsdfhu",
+    "нещо на Български",
+    "កាន់តែពិសេសអាចខលចេញ",
+    "🚀 (normal) 😶‍🌫️ (multiple emojis concatenated) ✅ (only emoji that has its own token)",
+    "Hello",
+    " Hello",
+    "  Hello",
+    "   Hello",
+    "    Hello",
+    "    Hello\n    Hello",
+    " (",
+    "\n =",
+    "' era",
+    "Hello, y'all! How are you 😁 ?我想在apple工作1314151天～",
+    "3",
+    "33",
+    "333",
+    "3333",
+    "33333",
+    "333333",
+    "3333333",
+    "33333333",
+    "333333333",
+    chktxt,
+]
+
+# write the tests to ./models/ggml-vocab-{name}.gguf.inp
+# the format is:
+#
+# test0
+# __ggml_vocab_test__
+# test1
+# __ggml_vocab_test__
+# ...
+#
+
+# with each model, encode all tests and write the results in ./models/ggml-vocab-{name}.gguf.out
+# for each test, write the resulting tokens on a separate line
+
+for model in models:
+    name = model["name"]
+    tokt = model["tokt"]
+
+    # create the tokenizer
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(f"models/tokenizers/{name}")
+
+    with open(f"models/ggml-vocab-{name}.gguf.inp", "w") as f:
+        for text in tests:
+            f.write(f"{text}")
+            f.write("\n__ggml_vocab_test__\n")
+
+    with open(f"models/ggml-vocab-{name}.gguf.out", "w") as f:
+        for text in tests:
+            res = tokenizer.encode(text, add_special_tokens=False)
+            for r in res:
+                f.write(f" {r}")
+            f.write("\n")
+
+    print(f"Tests for {name} written in ./models/ggml-vocab-{name}.gguf.*")
+
+# generate commands for creating vocab files
+
+print("\nRun the following commands to generate the vocab files for testing:\n")
+
+for model in models:
+    name = model["name"]
+
+    print(f"python3 convert-hf-to-gguf.py models/tokenizers/{name}/ --outfile models/ggml-vocab-{name}.gguf --vocab-only")
+
+print("\n")
