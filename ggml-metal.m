@@ -2643,13 +2643,25 @@ static enum ggml_status ggml_metal_graph_compute(
                             GGML_ASSERT(nqptg  % 8  == 0);
                             GGML_ASSERT(ncpsg  % 32 == 0);
 
+                            int64_t nsgmax = 2;
+
+                            while (true) {
+                                const size_t smem = nqptg*(ne00 + 2*nsgmax*(ncpsg + nqptg))*(sizeof(float)/2);
+                                if (smem > ctx->device.maxThreadgroupMemoryLength) {
+                                    break;
+                                }
+                                nsgmax *= 2;
+                            }
+                            nsgmax /= 2;
+
                             // simdgroups per threadgroup (a.k.a. warps)
-                            const int64_t nsg = ne01 <= nqptg ? MAX(4, MIN(ne11/ncpsg, (int64_t) pipeline.maxTotalThreadsPerThreadgroup/32)) : 4;
+                            const int64_t nsg = ne01 <= nqptg ? MAX(4, MIN(nsgmax, MIN(ne11/ncpsg, (int64_t) pipeline.maxTotalThreadsPerThreadgroup/32))) : 4;
 
                             const size_t smem = nqptg*(ne00 + 2*nsg*(ncpsg + nqptg))*(sizeof(float)/2);
 
                             //printf("smem: %zu, max: %zu\n", smem, ctx->device.maxThreadgroupMemoryLength);
                             GGML_ASSERT(smem <= ctx->device.maxThreadgroupMemoryLength);
+
                             [encoder setThreadgroupMemoryLength:GGML_PAD(smem, 16) atIndex:0];
 
                             [encoder dispatchThreadgroups:MTLSizeMake((ne01 + nqptg - 1)/nqptg, ne02, ne03) threadsPerThreadgroup:MTLSizeMake(32, nsg, 1)];
@@ -2767,6 +2779,45 @@ static enum ggml_status ggml_metal_graph_compute(
         MTLCommandBufferStatus status = [command_buffer status];
         if (status != MTLCommandBufferStatusCompleted) {
             GGML_METAL_LOG_INFO("%s: command buffer %d failed with status %lu\n", __func__, i, status);
+            if (status == MTLCommandBufferStatusError) {
+                MTLCommandBufferError error_code = [command_buffer error].code;
+                switch (error_code) {
+                    case MTLCommandBufferErrorNone:
+                        GGML_METAL_LOG_INFO("no error code reported\n");
+                        break;
+                    case MTLCommandBufferErrorTimeout:
+                        GGML_METAL_LOG_INFO("timeout\n");
+                        break;
+                    case MTLCommandBufferErrorPageFault:
+                        GGML_METAL_LOG_INFO("unserviceable page fault\n");
+                        break;
+                    case MTLCommandBufferErrorOutOfMemory:
+                        GGML_METAL_LOG_INFO("out of memory\n");
+                        break;
+                    case MTLCommandBufferErrorInvalidResource:
+                        GGML_METAL_LOG_INFO("invalid reference to resource\n");
+                        break;
+                    case MTLCommandBufferErrorMemoryless:
+                        GGML_METAL_LOG_INFO("GPU ran out of one or more of its internal resources that support memoryless render pass attachments\n");
+                        break;
+                    case MTLCommandBufferErrorDeviceRemoved:
+                        GGML_METAL_LOG_INFO("device removed\n");
+                        break;
+                    case MTLCommandBufferErrorStackOverflow:
+                        GGML_METAL_LOG_INFO("kernel function of tile shader used too many stack frames\n");
+                        break;
+                    case MTLCommandBufferErrorAccessRevoked:
+                        GGML_METAL_LOG_INFO("access to device revoked by system\n");
+                        break;
+                    case MTLCommandBufferErrorInternal:
+                        GGML_METAL_LOG_INFO("internal error\n");
+                        break;
+                    default:
+                        GGML_METAL_LOG_INFO("unknown error %lu\n", error_code);
+                        break;
+                }
+            }
+
             return GGML_STATUS_FAILED;
         }
     }
