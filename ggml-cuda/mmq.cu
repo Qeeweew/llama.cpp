@@ -2184,6 +2184,224 @@ static void ggml_mul_mat_q6_K_q8_1_cuda(
     }
 }
 
+
+#define QK8_X 32
+typedef struct {
+    float d;       // delta
+    int8_t  qs[QK8_0]; // quants
+} block_q8_x;
+
+template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinline__ void load_tiles_q8_x(
+    const void * __restrict__ vx, int * __restrict__ x_ql, half2 * __restrict__ x_dm, int * __restrict__ x_qh,
+    int * __restrict__ x_sc, const int & i_offset, const int & i_max, const int & k, const int & blocks_per_row) {
+    GGML_UNUSED(x_qh); GGML_UNUSED(x_sc);
+
+    GGML_CUDA_ASSUME(i_offset >= 0);
+    GGML_CUDA_ASSUME(i_offset <  nwarps);
+    GGML_CUDA_ASSUME(k >= 0);
+    GGML_CUDA_ASSUME(k <  WARP_SIZE);
+
+    const int kbx  = k / QI8_0;
+    const int kqsx = k % QI8_0;
+    float * x_dmf = (float *) x_dm;
+
+    const block_q8_x * bx0 = (const block_q8_x *) vx;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps) {
+        int i = i0 + i_offset;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q8_x * bxi = bx0 + i*blocks_per_row + kbx;
+
+        x_ql[i * (WARP_SIZE + 1) + k] = get_int_from_int8_aligned(bxi->qs, kqsx);
+    }
+
+    const int blocks_per_tile_x_row = WARP_SIZE / QI8_0;
+    const int kbxd = k % blocks_per_tile_x_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps * QI8_0) {
+        int i = i0 + i_offset * QI8_0 + k / blocks_per_tile_x_row;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q8_x * bxi = bx0 + i*blocks_per_row + kbxd;
+
+        x_dmf[i * (WARP_SIZE/QI8_0) + i / QI8_0 + kbxd] = bxi->d;
+    }
+}
+
+template <bool need_check> static __global__ void
+#if defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
+#if defined(RDNA3) || defined(RDNA2)
+    __launch_bounds__(WARP_SIZE*NWARPS_Q8_0_RDNA2, 2)
+#endif // defined(RDNA3) || defined(RDNA2)
+#endif // defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
+    mul_mat_q8_x(
+    const void * __restrict__ vx, const void * __restrict__ vy, float * __restrict__ dst,
+    const int ncols_x, const int nrows_x, const int ncols_y, const int nrows_y, const int nrows_dst) {
+
+#if defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
+#if defined(RDNA3) || defined(RDNA2)
+    const int mmq_x  =  MMQ_X_Q8_0_RDNA2;
+    const int mmq_y  =  MMQ_Y_Q8_0_RDNA2;
+    const int nwarps = NWARPS_Q8_0_RDNA2;
+#else
+    const int mmq_x  =  MMQ_X_Q8_0_RDNA1;
+    const int mmq_y  =  MMQ_Y_Q8_0_RDNA1;
+    const int nwarps = NWARPS_Q8_0_RDNA1;
+#endif // defined(RDNA3) || defined(RDNA2)
+
+    mul_mat_q<QK8_0, QR8_0, QI8_0, false, block_q8_x, mmq_x, mmq_y, nwarps, allocate_tiles_q8_0<mmq_y>,
+        load_tiles_q8_x<mmq_y, nwarps, need_check>, VDR_Q8_0_Q8_1_MMQ, vec_dot_q8_0_q8_1_mul_mat>
+        (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+
+#elif __CUDA_ARCH__ >= CC_VOLTA
+    const int mmq_x  =  MMQ_X_Q8_0_AMPERE;
+    const int mmq_y  =  MMQ_Y_Q8_0_AMPERE;
+    const int nwarps = NWARPS_Q8_0_AMPERE;
+
+    mul_mat_q<QK8_0, QR8_0, QI8_0, false, block_q8_x, mmq_x, mmq_y, nwarps, allocate_tiles_q8_0<mmq_y>,
+        load_tiles_q8_x<mmq_y, nwarps, need_check>, VDR_Q8_0_Q8_1_MMQ, vec_dot_q8_0_q8_1_mul_mat>
+        (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+
+#elif __CUDA_ARCH__ >= MIN_CC_DP4A
+    const int mmq_x  =  MMQ_X_Q8_0_PASCAL;
+    const int mmq_y  =  MMQ_Y_Q8_0_PASCAL;
+    const int nwarps = NWARPS_Q8_0_PASCAL;
+
+    mul_mat_q<QK8_0, QR8_0, QI8_0, false, block_q8_x, mmq_x, mmq_y, nwarps, allocate_tiles_q8_0<mmq_y>,
+        load_tiles_q8_x<mmq_y, nwarps, need_check>, VDR_Q8_0_Q8_1_MMQ, vec_dot_q8_0_q8_1_mul_mat>
+        (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+#else
+    GGML_UNUSED(vec_dot_q8_0_q8_1_mul_mat);
+    NO_DEVICE_CODE;
+#endif // __CUDA_ARCH__ >= CC_VOLTA
+}
+
+static void ggml_mul_mat_q8_x_q8_1_cuda(
+    const void * vx, const void * vy, float * dst, const int ncols_x, const int nrows_x,
+    const int ncols_y, const int nrows_y, const int nrows_dst, cudaStream_t stream) {
+
+    int id;
+    CUDA_CHECK(cudaGetDevice(&id));
+    const int compute_capability = ggml_cuda_info().devices[id].cc;
+
+    int mmq_x, mmq_y, nwarps;
+    if (compute_capability >= CC_RDNA2) {
+        mmq_x  =  MMQ_X_Q8_0_RDNA2;
+        mmq_y  =  MMQ_Y_Q8_0_RDNA2;
+        nwarps = NWARPS_Q8_0_RDNA2;
+    } else if (compute_capability >= CC_OFFSET_AMD) {
+        mmq_x  =  MMQ_X_Q8_0_RDNA1;
+        mmq_y  =  MMQ_Y_Q8_0_RDNA1;
+        nwarps = NWARPS_Q8_0_RDNA1;
+    } else if (compute_capability >= CC_VOLTA) {
+        mmq_x  =  MMQ_X_Q8_0_AMPERE;
+        mmq_y  =  MMQ_Y_Q8_0_AMPERE;
+        nwarps = NWARPS_Q8_0_AMPERE;
+    } else if (compute_capability >= MIN_CC_DP4A) {
+        mmq_x  =  MMQ_X_Q8_0_PASCAL;
+        mmq_y  =  MMQ_Y_Q8_0_PASCAL;
+        nwarps = NWARPS_Q8_0_PASCAL;
+    } else {
+        GGML_ASSERT(false);
+    }
+
+    const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
+    const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
+    const dim3 block_nums(block_num_x, block_num_y, 1);
+    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+
+    if (nrows_x % mmq_y == 0) {
+        const bool need_check = false;
+        mul_mat_q8_x<need_check><<<block_nums, block_dims, 0, stream>>>
+            (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+    } else {
+        const bool need_check = true;
+        mul_mat_q8_x<need_check><<<block_nums, block_dims, 0, stream>>>
+            (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+    }
+}
+
+/*
+static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+
+#if QK_K == 256
+#if __CUDA_ARCH__ >= MIN_CC_DP4A // lowest compute capability for integer intrinsics
+
+    const block_iq4_xs * bq4 = (const block_iq4_xs *) vbq;
+    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
+
+    // iqs is 0...7
+    const int ib32 = iqs;
+    const int32_t  * q8 = (const int *)bq8_1[ib32].qs;
+    const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
+    const int8_t ls = ((bq4->scales_l[ib32/2] >> 4*(ib32%2)) & 0xf) | (((bq4->scales_h >> 2*ib32) & 3) << 4);
+    const float d = (float)bq4->d * (ls - 32) * __low2float(bq8_1[ib32].ds);
+    int v1, v2;
+    int sumi1 = 0, sumi2 = 0;
+    for (int j = 0; j < 4; ++j) {
+        get_int_from_table_16(q4[j], values, v1, v2);
+        sumi1 = __dp4a(v1, q8[j+0], sumi1);
+        sumi2 = __dp4a(v2, q8[j+4], sumi2);
+    }
+    return d * (sumi1 + sumi2);
+
+#else
+    NO_DEVICE_CODE;
+#endif
+#else
+    return vec_dot_iq4_xs_q8_1(vbq, bq8_1, iqs);
+#endif
+}
+*/
+
+template<int nwarps>
+static __global__ void dequantize_block_iq4_xs_q8_x(int n_block_q8, const void * __restrict__ vx, block_q8_x * __restrict__ vy) {
+    const int i = (blockIdx.x * nwarps + threadIdx.y) * WARP_SIZE + threadIdx.x;
+    if (i >= n_block_q8) {
+        return;
+    }
+    const block_iq4_xs * bq4 = (const block_iq4_xs *)vx + (i / 8);
+    block_q8_x * y = vy + i;
+    const int tid = threadIdx.x;
+    const int ib32 = tid % 8;
+    const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
+    const int8_t ls = ((bq4->scales_l[ib32/2] >> 4*(ib32%2)) & 0xf) | (((bq4->scales_h >> 2*ib32) & 3) << 4);
+    y->d = (float)bq4->d * (ls - 32);
+    int* qy1 = (int *) &y->qs[0];
+    int* qy2 = (int *) &y->qs[16];
+    const uint32_t * values = (const uint32_t *) kvalues_iq4nl;
+    int v1, v2;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        get_int_from_table_16(q4[j], values, v1, v2);
+        qy1[j] = v1;
+        qy2[j] = v2;
+    }
+}
+
+static void ggml_mul_mat_iq4_xs_q8_1_cuda(
+    void * buffer, const void * vx, const void * vy, float * dst, const int ncols_x, const int nrows_x,
+    const int ncols_y, const int nrows_y, const int nrows_dst, cudaStream_t stream) {
+    int id;
+    CUDA_CHECK(cudaGetDevice(&id));
+    constexpr int nwraps = 4;
+    dim3 block_dims = dim3(WARP_SIZE, nwraps, 1);
+    int n_block_q8 = (int64_t) ncols_x * nrows_x / QK8_X;
+    int block_nums = (n_block_q8 - 1) / (nwraps * 8) + 1;
+    dequantize_block_iq4_xs_q8_x<nwraps><<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, (block_q8_x *)buffer);
+    ggml_mul_mat_q8_x_q8_1_cuda(buffer, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst, stream);
+}
+
 void ggml_cuda_op_mul_mat_q(
     ggml_backend_cuda_context & ctx,
     const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, const char * src0_dd_i, const float * src1_ddf_i,
@@ -2236,6 +2454,12 @@ void ggml_cuda_op_mul_mat_q(
         case GGML_TYPE_Q6_K:
             ggml_mul_mat_q6_K_q8_1_cuda(src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
             break;
+        case GGML_TYPE_IQ4_XS:
+            {
+                ggml_cuda_pool_alloc<char> q8_buffer(ctx.pool(), sizeof(block_q8_x)* ne00* row_diff / QK8_X);
+                ggml_mul_mat_iq4_xs_q8_1_cuda(q8_buffer.get(), src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
+            }
+            break;
         default:
             GGML_ASSERT(false);
             break;
@@ -2258,6 +2482,7 @@ bool ggml_cuda_supports_mmq(enum ggml_type type) {
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
+        case GGML_TYPE_IQ4_XS:
             return true;
         default:
             return false;
