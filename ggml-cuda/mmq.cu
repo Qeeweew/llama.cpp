@@ -2188,7 +2188,7 @@ static void ggml_mul_mat_q6_K_q8_1_cuda(
 #define QK8_X 32
 typedef struct {
     float d;       // delta
-    int8_t  qs[QK8_0]; // quants
+    int8_t qs[QK8_0]; // quants
 } block_q8_x;
 
 template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinline__ void load_tiles_q8_x(
@@ -2330,62 +2330,31 @@ static void ggml_mul_mat_q8_x_q8_1_cuda(
     }
 }
 
-/*
-static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
-
-#if QK_K == 256
-#if __CUDA_ARCH__ >= MIN_CC_DP4A // lowest compute capability for integer intrinsics
-
-    const block_iq4_xs * bq4 = (const block_iq4_xs *) vbq;
-    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
-
-    // iqs is 0...7
-    const int ib32 = iqs;
-    const int32_t  * q8 = (const int *)bq8_1[ib32].qs;
-    const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
-    const int8_t ls = ((bq4->scales_l[ib32/2] >> 4*(ib32%2)) & 0xf) | (((bq4->scales_h >> 2*ib32) & 3) << 4);
-    const float d = (float)bq4->d * (ls - 32) * __low2float(bq8_1[ib32].ds);
-    int v1, v2;
-    int sumi1 = 0, sumi2 = 0;
-    for (int j = 0; j < 4; ++j) {
-        get_int_from_table_16(q4[j], values, v1, v2);
-        sumi1 = __dp4a(v1, q8[j+0], sumi1);
-        sumi2 = __dp4a(v2, q8[j+4], sumi2);
-    }
-    return d * (sumi1 + sumi2);
-
-#else
-    NO_DEVICE_CODE;
-#endif
-#else
-    return vec_dot_iq4_xs_q8_1(vbq, bq8_1, iqs);
-#endif
-}
-*/
-
-template<int nwarps>
 static __global__ void dequantize_block_iq4_xs_q8_x(int n_block_q8, const void * __restrict__ vx, block_q8_x * __restrict__ vy) {
-    const int i = (blockIdx.x * nwarps + threadIdx.y) * WARP_SIZE + threadIdx.x;
-    if (i >= n_block_q8) {
-        return;
-    }
-    const block_iq4_xs * bq4 = (const block_iq4_xs *)vx + (i / 8);
-    block_q8_x * y = vy + i;
+    __shared__ block_q8_x buffer[32];
+    const int i = blockIdx.x * WARP_SIZE + threadIdx.x;
     const int tid = threadIdx.x;
     const int ib32 = tid % 8;
-    const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
-    const int8_t ls = ((bq4->scales_l[ib32/2] >> 4*(ib32%2)) & 0xf) | (((bq4->scales_h >> 2*ib32) & 3) << 4);
-    y->d = (float)bq4->d * (ls - 32);
-    int* qy1 = (int *) &y->qs[0];
-    int* qy2 = (int *) &y->qs[16];
-    const uint32_t * values = (const uint32_t *) kvalues_iq4nl;
-    int v1, v2;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        get_int_from_table_16(q4[j], values, v1, v2);
-        qy1[j] = v1;
-        qy2[j] = v2;
+    if (i < n_block_q8) {
+        const block_iq4_xs * bq4 = (const block_iq4_xs *)vx + (i / 8);
+        const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
+        const int8_t ls = ((bq4->scales_l[ib32/2] >> 4*(ib32%2)) & 0xf) | (((bq4->scales_h >> 2*ib32) & 3) << 4);
+        buffer[tid].d = (float)bq4->d * (ls - 32);
+        int* qy1 = (int *) &buffer[tid].qs[0];
+        int* qy2 = (int *) &buffer[tid].qs[16];
+        const uint32_t * values = (const uint32_t *) kvalues_iq4nl;
+        int v1, v2;
+    #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            get_int_from_table_16(q4[j], values, v1, v2);
+            qy1[j] = v1;
+            qy2[j] = v2;
+        }
+    }
+    int* src = (int *) buffer;
+    int* dst = (int *) (vy + blockIdx.x * WARP_SIZE);
+    for (int i = 0;i < 9;i++) {
+        dst[tid + i * WARP_SIZE] = src[tid + i * WARP_SIZE];
     }
 }
 
@@ -2394,11 +2363,11 @@ static void ggml_mul_mat_iq4_xs_q8_1_cuda(
     const int ncols_y, const int nrows_y, const int nrows_dst, cudaStream_t stream) {
     int id;
     CUDA_CHECK(cudaGetDevice(&id));
-    constexpr int nwraps = 4;
-    dim3 block_dims = dim3(WARP_SIZE, nwraps, 1);
+    constexpr int nwarps = 1;
+    dim3 block_dims = dim3(WARP_SIZE, nwarps, 1);
     int n_block_q8 = (int64_t) ncols_x * nrows_x / QK8_X;
-    int block_nums = (n_block_q8 - 1) / (nwraps * 8) + 1;
-    dequantize_block_iq4_xs_q8_x<nwraps><<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, (block_q8_x *)buffer);
+    int block_nums = (n_block_q8 - 1) / (nwarps * 32) + 1;
+    dequantize_block_iq4_xs_q8_x<<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, (block_q8_x *)buffer);
     ggml_mul_mat_q8_x_q8_1_cuda(buffer, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst, stream);
 }
 
@@ -2456,7 +2425,7 @@ void ggml_cuda_op_mul_mat_q(
             break;
         case GGML_TYPE_IQ4_XS:
             {
-                ggml_cuda_pool_alloc<char> q8_buffer(ctx.pool(), sizeof(block_q8_x)* ne00* row_diff / QK8_X);
+                ggml_cuda_pool_alloc<char> q8_buffer(ctx.pool(), GGML_PAD(sizeof(block_q8_x)* ne00* row_diff / QK8_X, 128));
                 ggml_mul_mat_iq4_xs_q8_1_cuda(q8_buffer.get(), src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
             }
             break;
