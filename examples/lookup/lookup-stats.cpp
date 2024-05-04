@@ -46,15 +46,18 @@ int main(int argc, char ** argv){
         const int64_t t_start_draft_us = ggml_time_us();
 
         if (!params.lookup_cache_static.empty()) {
-            if(!llama_ngram_cache_load(ngram_cache_static, params.lookup_cache_static)) {
+            try {
+                ngram_cache_static = llama_ngram_cache_load(params.lookup_cache_static);
+            } catch (std::ifstream::failure const &) {
                 fprintf(stderr, "error: failed to open static lookup cache: %s", params.lookup_cache_static.c_str());
                 exit(1);
             }
         }
 
         if (!params.lookup_cache_dynamic.empty()) {
-            // If the dynamic lookup cache doesn't exist it will be created at the end of the program:
-            llama_ngram_cache_load(ngram_cache_dynamic, params.lookup_cache_dynamic);
+            try {
+                ngram_cache_dynamic = llama_ngram_cache_load(params.lookup_cache_dynamic);
+            } catch (std::ifstream::failure const &) {} // if the file does not exist it will simply be created at the end of the program
         }
 
         t_draft_flat_us += ggml_time_us() - t_start_draft_us;
@@ -82,9 +85,7 @@ int main(int argc, char ** argv){
 
             {
                 const int64_t t_start_draft_us = ggml_time_us();
-                llama_ngram_cache_draft(
-                    pseudo_output.data(), pseudo_output.size(), draft, n_draft, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX,
-                    ngram_cache_context, ngram_cache_dynamic, ngram_cache_static);
+                llama_ngram_cache_draft(pseudo_output, draft, n_draft, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, ngram_cache_context, ngram_cache_dynamic, ngram_cache_static);
                 t_draft_us += ggml_time_us() - t_start_draft_us;
             }
 
@@ -103,8 +104,7 @@ int main(int argc, char ** argv){
 
                 {
                     const int64_t t_start_draft_us = ggml_time_us();
-                    llama_ngram_cache_update(
-                        ngram_cache_context, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, pseudo_output.data(), pseudo_output.size(), 1, false);
+                    llama_ngram_cache_update(ngram_cache_context, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, pseudo_output, 1, false);
                     t_draft_us += ggml_time_us() - t_start_draft_us;
                 }
             }
@@ -114,8 +114,7 @@ int main(int argc, char ** argv){
                 pseudo_output.push_back(inp_slice[pseudo_output.size()]);
                 {
                     const int64_t t_start_draft_us = ggml_time_us();
-                    llama_ngram_cache_update(
-                        ngram_cache_context, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, pseudo_output.data(), pseudo_output.size(), 1, false);
+                    llama_ngram_cache_update(ngram_cache_context, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, pseudo_output, 1, false);
                     t_draft_us += ggml_time_us() - t_start_draft_us;
                 }
             }
