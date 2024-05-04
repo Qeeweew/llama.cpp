@@ -2343,12 +2343,9 @@ static __global__ void dequantize_block_iq4_xs_q8_x(int n_block_q8, const void *
         int* qy1 = (int *) &buffer[tid].qs[0];
         int* qy2 = (int *) &buffer[tid].qs[16];
         const uint32_t * values = (const uint32_t *) kvalues_iq4nl;
-        int v1, v2;
-    #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) {
-            get_int_from_table_16(q4[j], values, v1, v2);
-            qy1[j] = v1;
-            qy2[j] = v2;
+            get_int_from_table_16(q4[j], values, qy1[j], qy2[j]);
         }
     }
     int* src = (int *) buffer;
@@ -2359,7 +2356,7 @@ static __global__ void dequantize_block_iq4_xs_q8_x(int n_block_q8, const void *
 }
 
 static void ggml_mul_mat_iq4_xs_q8_1_cuda(
-    void * buffer, const void * vx, const void * vy, float * dst, const int ncols_x, const int nrows_x,
+    block_q8_x *buffer, const void * vx, const void * vy, float * dst, const int ncols_x, const int nrows_x,
     const int ncols_y, const int nrows_y, const int nrows_dst, cudaStream_t stream) {
     int id;
     CUDA_CHECK(cudaGetDevice(&id));
@@ -2367,7 +2364,7 @@ static void ggml_mul_mat_iq4_xs_q8_1_cuda(
     dim3 block_dims = dim3(WARP_SIZE, nwarps, 1);
     int n_block_q8 = (int64_t) ncols_x * nrows_x / QK8_X;
     int block_nums = (n_block_q8 - 1) / (nwarps * 32) + 1;
-    dequantize_block_iq4_xs_q8_x<<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, (block_q8_x *)buffer);
+    dequantize_block_iq4_xs_q8_x<<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, buffer);
     ggml_mul_mat_q8_x_q8_1_cuda(buffer, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst, stream);
 }
 
@@ -2425,7 +2422,7 @@ void ggml_cuda_op_mul_mat_q(
             break;
         case GGML_TYPE_IQ4_XS:
             {
-                ggml_cuda_pool_alloc<char> q8_buffer(ctx.pool(), GGML_PAD(sizeof(block_q8_x)* ne00* row_diff / QK8_X, 128));
+                ggml_cuda_pool_alloc<block_q8_x> q8_buffer(ctx.pool(), GGML_PAD(ne00* row_diff / QK8_X, 4));
                 ggml_mul_mat_iq4_xs_q8_1_cuda(q8_buffer.get(), src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
             }
             break;
