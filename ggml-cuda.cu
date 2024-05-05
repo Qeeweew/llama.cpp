@@ -1094,7 +1094,7 @@ static __global__ void mul_mat_p021_f16_f32(
 
         // y is not transposed but permuted
         for (int j = 0; j < ncols_y; j++) {
-            const int iy = j*channel*ncols_y*nrows_y + channel*nrows_y + row_y;
+            const int iy = j*nchannels_y*nrows_y + channel*nrows_y + row_y;
             tmp[j] += xi * y[iy];
         }
     }
@@ -2019,6 +2019,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     //printf("src1 is contiguous %d, transposed %d, type = %s, name = %s\n", ggml_is_contiguous(src1), ggml_is_transposed(src1), ggml_type_name(src1->type), src1->name);
 
     if (!split && !fp16_performance_good && src1->ne[1] <= 8 && src1->ne[3] == 1 && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F32 && !ggml_is_transposed(src1)) {
+        // the conditions are not correct actually in general cases
         if (ggml_is_permuted(src0) && ggml_is_permuted(src1)) {
             // KQ single-batch
             ggml_cuda_mul_mat_vec_p021(ctx, src0, src1, dst);
