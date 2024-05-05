@@ -1062,6 +1062,7 @@ typedef void (*ggml_cuda_op_mul_mat_t)(
 
 #define MUL_MAT_SRC1_COL_STRIDE 128
 
+template<int ncols_y>
 static __global__ void mul_mat_p021_f16_f32(
     const void * __restrict__ vx, const float * __restrict__ y, float * __restrict__ dst,
     const int ncols_x, const int nrows_x, const int nchannels_x, const int nchannels_y) {
@@ -1076,7 +1077,7 @@ static __global__ void mul_mat_p021_f16_f32(
     const int nrows_dst = nrows_x;
     const int row_dst = row_x;
 
-    float tmp = 0.0f;
+    float tmp[ncols_y] = {0.0f};
 
     for (int col_x0 = 0; col_x0 < ncols_x; col_x0 += blockDim.x) {
         const int col_x = col_x0 + threadIdx.x;
@@ -1092,22 +1093,25 @@ static __global__ void mul_mat_p021_f16_f32(
         const int row_y = col_x;
 
         // y is not transposed but permuted
-        const int iy = channel*nrows_y + row_y;
-
-        tmp += xi * y[iy];
+        for (int j = 0; j < ncols_y; j++) {
+            const int iy = j*channel*ncols_y*nrows_y + channel*nrows_y + row_y;
+            tmp[j] += xi * y[iy];
+        }
     }
 
-    // dst is not transposed and not permuted
-    const int idst = channel*nrows_dst + row_dst;
-
-    // sum up partial sums and write back result
-    tmp = warp_reduce_sum(tmp);
+    for (int j = 0; j < ncols_y; j++) {
+        tmp[j] = warp_reduce_sum(tmp[j]);
+    }
 
     if (threadIdx.x == 0) {
-        dst[idst] = tmp;
+        for (int j = 0; j < ncols_y; j++) {
+            const int idst = (channel*ncols_y+j)*nrows_dst + row_dst;
+            dst[idst] = tmp[j];
+        }
     }
 }
 
+template<int ncols_y>
 static __global__ void mul_mat_vec_nc_f16_f32( // nc == non-contiguous
     const void * __restrict__ vx, const float * __restrict__ y, float * __restrict__ dst, const int ncols_x, const int nrows_x,
     const int row_stride_x, const int channel_stride_x, const int channel_x_divisor) {
@@ -1122,9 +1126,7 @@ static __global__ void mul_mat_vec_nc_f16_f32( // nc == non-contiguous
     const int nrows_dst = nrows_x;
     const int row_dst   = row_x;
 
-    const int idst = channel*nrows_dst + row_dst;
-
-    float tmp = 0.0f;
+    float tmp[ncols_y] = {0.0f};
 
     for (int col_x0 = 0; col_x0 < ncols_x; col_x0 += blockDim.x) {
         const int col_x = col_x0 + threadIdx.x;
@@ -1136,38 +1138,110 @@ static __global__ void mul_mat_vec_nc_f16_f32( // nc == non-contiguous
         const int row_y = col_x;
 
         const int ix = channel_x*channel_stride_x + row_x*row_stride_x + col_x;
-        const int iy = channel*nrows_y + row_y;
 
         const float xi = __half2float(x[ix]);
 
-        tmp += xi * y[iy];
+        for (int j = 0; j < ncols_y; j++) {
+            const int iy = (channel*ncols_y+j)*nrows_y + row_y;
+            tmp[j] += xi * y[iy];
+        }
     }
 
     // sum up partial sums and write back result
-    tmp = warp_reduce_sum(tmp);
+    for (int j = 0; j < ncols_y; j++) {
+        tmp[j] = warp_reduce_sum(tmp[j]);
+    }
 
     if (threadIdx.x == 0) {
-        dst[idst] = tmp;
+        for (int j = 0; j < ncols_y; j++) {
+            const int idst = (channel*ncols_y+j)*nrows_dst + row_dst;
+            dst[idst] = tmp[j];
+        }
     }
 }
 
 static void ggml_mul_mat_p021_f16_f32_cuda(
     const void * vx, const float * y, float * dst, const int ncols_x, const int nrows_x,
-    const int nchannels_x, const int nchannels_y, cudaStream_t stream) {
+    const int nchannels_x, const int nchannels_y, int ncols_y, cudaStream_t stream) {
 
     const dim3 block_nums(1, nrows_x, nchannels_y);
     const dim3 block_dims(WARP_SIZE, 1, 1);
-    mul_mat_p021_f16_f32<<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+    switch (ncols_y)
+    {
+    case 1:
+        mul_mat_p021_f16_f32<1><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 2:
+        mul_mat_p021_f16_f32<2><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 3:
+        mul_mat_p021_f16_f32<3><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 4:
+        mul_mat_p021_f16_f32<4><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 5:
+        mul_mat_p021_f16_f32<5><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 6:
+        mul_mat_p021_f16_f32<6><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 7:
+        mul_mat_p021_f16_f32<7><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    case 8:
+        mul_mat_p021_f16_f32<8><<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols_x, nrows_x, nchannels_x, nchannels_y);
+        break;
+    default:
+        GGML_ASSERT(false);
+        break;
+    }
 }
 
 static void ggml_mul_mat_vec_nc_f16_f32_cuda(
     const void * vx, const float * y, float * dst, const int ncols_x, const int nrows_x, const int row_stride_x,
-    const int nchannels_x, const int nchannels_y, const int channel_stride_x, cudaStream_t stream) {
+    const int nchannels_x, const int nchannels_y, const int channel_stride_x, int ncols_y, cudaStream_t stream) {
 
     const dim3 block_nums(1, nrows_x, nchannels_y);
     const dim3 block_dims(WARP_SIZE, 1, 1);
-    mul_mat_vec_nc_f16_f32<<<block_nums, block_dims, 0, stream>>>
-        (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+    switch (ncols_y)
+    {
+    case 1:
+        mul_mat_vec_nc_f16_f32<1><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 2:
+        mul_mat_vec_nc_f16_f32<2><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 3:
+        mul_mat_vec_nc_f16_f32<3><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 4:
+        mul_mat_vec_nc_f16_f32<4><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 5:
+        mul_mat_vec_nc_f16_f32<5><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 6:
+        mul_mat_vec_nc_f16_f32<6><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 7:
+        mul_mat_vec_nc_f16_f32<7><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    case 8:
+        mul_mat_vec_nc_f16_f32<8><<<block_nums, block_dims, 0, stream>>>
+            (vx, y, dst, ncols_x, nrows_x, row_stride_x, channel_stride_x, nchannels_y/nchannels_x);
+        break;
+    default:
+        GGML_ASSERT(false);
+        break;
+    }
 }
 
 static cudaError_t ggml_cuda_cpy_tensor_2d(
@@ -1659,6 +1733,7 @@ static void ggml_cuda_mul_mat_vec_p021(ggml_backend_cuda_context & ctx, const gg
     const int64_t ne01 = src0->ne[1];
     const int64_t ne02 = src0->ne[2];
 
+    const int64_t ne11 = src1->ne[1];
     const int64_t ne12 = src1->ne[2];
 
     cudaStream_t main_stream = ctx.stream();
@@ -1667,7 +1742,7 @@ static void ggml_cuda_mul_mat_vec_p021(ggml_backend_cuda_context & ctx, const gg
     float * src1_ddf = (float *) src1->data;
     float * dst_ddf  = (float *) dst->data;
 
-    ggml_mul_mat_p021_f16_f32_cuda(src0_ddq, src1_ddf, dst_ddf, ne00, ne01, ne02, ne12, main_stream);
+    ggml_mul_mat_p021_f16_f32_cuda(src0_ddq, src1_ddf, dst_ddf, ne00, ne01, ne02, ne12, ne11, main_stream);
 }
 
 static void ggml_cuda_mul_mat_vec_nc(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst){
@@ -1685,6 +1760,7 @@ static void ggml_cuda_mul_mat_vec_nc(ggml_backend_cuda_context & ctx, const ggml
     const int64_t nb01 = src0->nb[1];
     const int64_t nb02 = src0->nb[2];
 
+    const int64_t ne11 = src1->ne[1];
     const int64_t ne12 = src1->ne[2];
 
     cudaStream_t main_stream = ctx.stream();
@@ -1696,7 +1772,7 @@ static void ggml_cuda_mul_mat_vec_nc(ggml_backend_cuda_context & ctx, const ggml
     const int64_t row_stride_x = nb01 / sizeof(half);
     const int64_t channel_stride_x = nb02 / sizeof(half);
 
-    ggml_mul_mat_vec_nc_f16_f32_cuda(src0_ddq, src1_ddf, dst_ddf, ne00, ne01, row_stride_x, ne02, ne12, channel_stride_x, main_stream);
+    ggml_mul_mat_vec_nc_f16_f32_cuda(src0_ddq, src1_ddf, dst_ddf, ne00, ne01, row_stride_x, ne02, ne12, channel_stride_x, ne11, main_stream);
 }
 
 static __global__ void k_compute_batched_ptrs(
@@ -1942,12 +2018,14 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     //printf("src0 is contiguous %d, transposed %d, type = %s, name = %s\n", ggml_is_contiguous(src0), ggml_is_transposed(src0), ggml_type_name(src0->type), src0->name);
     //printf("src1 is contiguous %d, transposed %d, type = %s, name = %s\n", ggml_is_contiguous(src1), ggml_is_transposed(src1), ggml_type_name(src1->type), src1->name);
 
-    if (!split && !fp16_performance_good && src0->type == GGML_TYPE_F16 && ggml_is_permuted(src0) && ggml_is_permuted(src1) && src1->ne[1] == 1) {
-        // KQ single-batch
-        ggml_cuda_mul_mat_vec_p021(ctx, src0, src1, dst);
-    } else if (!split && !fp16_performance_good && src0->type == GGML_TYPE_F16 && !ggml_is_transposed(src1) && src1->ne[1] == 1) {
-        // KQV single-batch
-        ggml_cuda_mul_mat_vec_nc(ctx, src0, src1, dst);
+    if (!split && !fp16_performance_good && src1->ne[1] <= 8 && src1->ne[3] == 1 && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F32 && !ggml_is_transposed(src1)) {
+        if (ggml_is_permuted(src0) && ggml_is_permuted(src1)) {
+            // KQ single-batch
+            ggml_cuda_mul_mat_vec_p021(ctx, src0, src1, dst);
+        } else {
+            // KQV single-batch
+            ggml_cuda_mul_mat_vec_nc(ctx, src0, src1, dst);
+        }
     } else if (!split && src0->type == GGML_TYPE_F16 && (src1->type == GGML_TYPE_F16 || fp16_performance_good) && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
         // KQ + KQV multi-batch
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
