@@ -460,8 +460,7 @@ void ggml_cuda_op_mul_mat_vec_q(
 
     const int64_t ne0 = dst->ne[0];
 
-    int id;
-    CUDA_CHECK(cudaGetDevice(&id));
+    int id = ggml_cuda_get_device();
 
     // the main device has a larger memory buffer to hold the results from all GPUs
     // nrows_dst == nrows of the matrix that the kernel writes into
