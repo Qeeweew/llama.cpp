@@ -2174,7 +2174,7 @@ static void ggml_mul_mat_q6_K_q8_1_cuda(
     }
 }
 
-
+/*
 #define QK8_X 32
 typedef struct {
     float d;       // delta
@@ -2357,6 +2357,7 @@ static void ggml_mul_mat_iq4_xs_q8_1_cuda(
     dequantize_block_iq4_xs_q8_x<<<block_nums, block_dims, 0, stream>>>(n_block_q8, vx, buffer);
     ggml_mul_mat_q8_x_q8_1_cuda(buffer, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst, stream);
 }
+*/
 
 void ggml_cuda_op_mul_mat_q(
     ggml_backend_cuda_context & ctx,
@@ -2410,12 +2411,12 @@ void ggml_cuda_op_mul_mat_q(
         case GGML_TYPE_Q6_K:
             ggml_mul_mat_q6_K_q8_1_cuda(src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
             break;
-        case GGML_TYPE_IQ4_XS:
-            {
-                ggml_cuda_pool_alloc<block_q8_x> q8_buffer(ctx.pool(), GGML_PAD(ne00* row_diff / QK8_X, 4));
-                ggml_mul_mat_iq4_xs_q8_1_cuda(q8_buffer.get(), src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
-            }
-            break;
+        // case GGML_TYPE_IQ4_XS:
+        //     {
+        //         ggml_cuda_pool_alloc<block_q8_x> q8_buffer(ctx.pool(), GGML_PAD(ne00* row_diff / QK8_X, 4));
+        //         ggml_mul_mat_iq4_xs_q8_1_cuda(q8_buffer.get(), src0_dd_i, src1_ddq_i, dst_dd_i, ne00, row_diff, src1_ncols, src1_padded_row_size, nrows_dst, stream);
+        //     }
+        //     break;
         default:
             GGML_ASSERT(false);
             break;
@@ -2438,8 +2439,8 @@ bool ggml_cuda_supports_mmq(enum ggml_type type) {
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
-        case GGML_TYPE_IQ4_XS:
-            return true;
+        // case GGML_TYPE_IQ4_XS:
+        //     return true;
         default:
             return false;
     }
