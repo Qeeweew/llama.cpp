@@ -11,8 +11,8 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
         type == GGML_TYPE_Q8_0 ? vec_dot_q8_0_q8_1 :
         type == GGML_TYPE_Q2_K ? vec_dot_q2_K_q8_1 :
         type == GGML_TYPE_Q3_K ? vec_dot_q3_K_q8_1 :
-        type == GGML_TYPE_Q4_K ? vec_dot_q4_K_q8_1 :
-        type == GGML_TYPE_Q5_K ? vec_dot_q5_K_q8_1 :
+        type == GGML_TYPE_Q4_K ? vec_dot_q4_K_q8_1_fast :
+        type == GGML_TYPE_Q5_K ? vec_dot_q5_K_q8_1_fast :
         type == GGML_TYPE_Q6_K ? vec_dot_q6_K_q8_1 :
         type == GGML_TYPE_IQ2_XXS ? vec_dot_iq2_xxs_q8_1 :
         type == GGML_TYPE_IQ2_XS ? vec_dot_iq2_xs_q8_1 :
@@ -34,8 +34,8 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
         type == GGML_TYPE_Q8_0    ? VDR_Q8_0_Q8_1_MMVQ :
         type == GGML_TYPE_Q2_K    ? VDR_Q2_K_Q8_1_MMVQ :
         type == GGML_TYPE_Q3_K    ? VDR_Q3_K_Q8_1_MMVQ :
-        type == GGML_TYPE_Q4_K    ? VDR_Q4_K_Q8_1_MMVQ :
-        type == GGML_TYPE_Q5_K    ? VDR_Q5_K_Q8_1_MMVQ :
+        type == GGML_TYPE_Q4_K    ? 4:
+        type == GGML_TYPE_Q5_K    ? 4:
         type == GGML_TYPE_Q6_K    ? VDR_Q6_K_Q8_1_MMVQ :
         type == GGML_TYPE_IQ2_XXS ? VDR_IQ2_XXS_Q8_1_MMVQ :
         type == GGML_TYPE_IQ2_XS  ? VDR_IQ2_XS_Q8_1_MMVQ :
@@ -130,9 +130,92 @@ static __global__ void mul_mat_vec_q(
 }
 
 template <ggml_type type>
+#if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
+// tell the compiler to use as many registers as it wants, see nwarps definition below
+__launch_bounds__(4*WARP_SIZE, 1)
+#endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
+static __global__ void mul_mat_vec_q_fast(
+    const void * __restrict__ vx, const void * __restrict__ vy, float * __restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_dst) {
+
+    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+
+    // blockDim.x = 32 && blockDim.y = 4
+    constexpr int qk = 256;
+    constexpr int qi = 32;
+    constexpr int vdr = 4;
+    constexpr int nwarps = 4;
+    constexpr int blocks_per_iter = vdr * WARP_SIZE / qi;
+
+    const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
+    const int row = nwarps * blockIdx.x +  threadIdx.y;
+    const int blocks_per_row_x = ncols_x / qk;
+
+    // partial sum for each thread
+    float acc = 0.0f;
+
+    const block_q8_1 * y = (const block_q8_1 *) vy;
+
+    __shared__ block_q8_1 y_shared[blocks_per_iter * (qk/QK8_1)];
+    float* buf = (float *)y_shared;
+    const int kqs = vdr * (threadIdx.x % (qi/vdr));
+    const int kbx_offset = threadIdx.x / (qi/vdr);
+    static_assert(sizeof(block_q8_1) * (qk/QK8_1) % 16 == 0);
+    const int blocks_per_row_x0 = blocks_per_row_x - blocks_per_row_x % blocks_per_iter;
+    for (int kbx = 0; kbx < blocks_per_row_x0; kbx += blocks_per_iter) {
+        const float* y_col = (const float* )&y[kbx * (qk/QK8_1)];
+        buf[tid] = y_col[tid];
+        buf[tid + 128] = y_col[tid + 128];
+        if (threadIdx.y == 0) {
+            buf[tid + 256] = y_col[tid + 256];
+        }
+        __syncthreads();
+        acc += vec_dot_q_cuda(
+            vx,
+            &y_shared[kbx_offset * (qk/QK8_1)],
+            kbx + kbx_offset + row*blocks_per_row_x, kqs);
+        __syncthreads();
+    }
+
+    __shared__ float dst_shared[nwarps];
+
+    acc = warp_reduce_sum(acc);
+    if (threadIdx.x == 0) {
+        dst_shared[threadIdx.y] = acc;
+    }
+    __syncthreads();
+    const int blocks_count = blocks_per_row_x - blocks_per_row_x0;
+    const int row0 = nwarps * blockIdx.x;
+    const int row_delta = threadIdx.x / (qi/vdr);
+    if (threadIdx.y < blocks_count) {
+        const int kbx = blocks_per_row_x0 + threadIdx.y;
+        float tmp = vec_dot_q_cuda(vx, &y[kbx * (qk/QK8_1)], kbx + (row0+row_delta)*blocks_per_row_x, kqs);
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 4, 8);
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 2, 8);
+        tmp += __shfl_xor_sync(0xffffffff, tmp, 1, 8);
+        if (kqs == 0) {
+            atomicAdd(&dst_shared[row_delta], tmp);
+        }
+    }
+    __syncthreads();
+    if (threadIdx.y == 0 && kqs == 0) {
+        dst[row_delta + row0] = dst_shared[row_delta];
+    }
+}
+
+template <ggml_type type>
 static void mul_mat_vec_q_cuda(
     const void * vx, const void * vy, float * dst,
     const int ncols_x, const int nrows_x, const int nrows_y, const int ncols_y, const int nrows_dst, cudaStream_t stream) {
+    
+    if (ncols_y == 1 && nrows_x % 4 == 0 && 
+        (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K || type == GGML_TYPE_IQ4_XS)) {
+        const int nblocks = nrows_x / 4;
+        const dim3 block_nums(nblocks, 1, 1);
+        const dim3 block_dims(WARP_SIZE, 4, 1);
+        mul_mat_vec_q_fast<type><<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_dst);
+        return;
+    }
 
     GGML_ASSERT(ncols_x % ggml_blck_size(type) == 0);
     GGML_ASSERT(ncols_y <= MMVQ_MAX_BATCH_SIZE);

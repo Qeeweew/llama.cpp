@@ -668,6 +668,34 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
 }
 
+static __device__ __forceinline__ float vec_dot_q4_K_q8_1_fast(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q4_K * bq4_K = (const block_q4_K *) vbq + kbx;
+    const int i_block = iqs / 4;
+
+    uint8_t sc, m4;
+    const uint8_t* q = bq4_K->scales;
+    if (i_block < 4) {
+        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
+    } else {
+        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
+        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
+    }
+    const int* v = (const int*) bq4_K->qs + i_block / 2 * 8;
+    const int* q8 = (const int*) bq8_1[i_block].qs;
+    int dot_sum = 0;
+#pragma unroll
+    for (int j = 0;j < 8;j++) {
+        dot_sum = ggml_cuda_dp4a(q8[j], (v[j] >> (iqs&4)) & 0x0f0f0f0f, dot_sum);
+    }
+    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
+    const float2 dm4f = __half22float2(bq4_K->dm);
+    float sumf_d = ds8f.x * (dot_sum * sc);
+    float sumf_m = ds8f.y * m4;
+    return dm4f.x * sumf_d - dm4f.y * sumf_m;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -712,6 +740,39 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     }
 
     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, bq4_K->dm, d8);
+}
+
+static __device__ __forceinline__ float vec_dot_q5_K_q8_1_fast(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q5_K * bq5_K = (const block_q5_K *) vbq + kbx;
+    const int i_block = iqs / 4;
+
+    uint8_t sc, m4;
+    const uint8_t* q = bq5_K->scales;
+    if (i_block < 4) {
+        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
+    } else {
+        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
+        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
+    }
+    const int* ql = (const int*) bq5_K->qs + i_block / 2 * 8;
+    const int* qh = (const int*) bq5_K->qh;
+    const int* q8 = (const int*) bq8_1[i_block].qs;
+    int dot_sum = 0;
+#pragma unroll
+    for (int j = 0;j < 8;j++) {
+        dot_sum = ggml_cuda_dp4a(
+            q8[j], 
+            ((ql[j] >> (iqs&4)) & 0x0f0f0f0f) | (((qh[j] >> i_block) << 4) & 0x10101010),
+            dot_sum
+        );
+    }
+    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
+    const float2 dm4f = __half22float2(bq5_K->dm);
+    float sumf_d = ds8f.x * (dot_sum * sc);
+    float sumf_m = ds8f.y * m4;
+    return dm4f.x * sumf_d - dm4f.y * sumf_m;
 }
 
 static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
@@ -1066,18 +1127,17 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
     return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
 }
 
-static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4) {
-    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
-    const int8_t * q0_8   = (const int8_t *) &q0_32;
-    const char4    val0_8 = make_char4(
-        kvalues_iq4nl[q0_8[0]], kvalues_iq4nl[q0_8[1]], kvalues_iq4nl[q0_8[2]], kvalues_iq4nl[q0_8[3]]);
-
-    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
-    const int8_t * q1_8   = (const int8_t *) &q1_32;
-    const char4    val1_8 = make_char4(
-        kvalues_iq4nl[q1_8[0]], kvalues_iq4nl[q1_8[1]], kvalues_iq4nl[q1_8[2]], kvalues_iq4nl[q1_8[3]]);
-
-    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
+static __device__ __forceinline__ int2 get_int_from_table_16(uint32_t q4) {
+    uint32_t v1, v2, v3, v4, mask;
+    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
+    mask = (0x32103210 | ((q4 & 0x88888888) >> 1));
+    v1 = __byte_perm(values[0], values[1], q4);
+    v2 = __byte_perm(values[2], values[3], q4);
+    v3 = __byte_perm(v1, v2, mask);
+    v1 = __byte_perm(values[0], values[1], q4 >> 16);
+    v2 = __byte_perm(values[2], values[3], q4 >> 16);
+    v4 = __byte_perm(v1, v2, mask >> 16);
+    return make_int2(__byte_perm(v3, v4, 0x6420), __byte_perm(v3, v4, 0x7531));
 }
 
 #define VDR_IQ4_NL_Q8_1_MMVQ 2

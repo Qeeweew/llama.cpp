@@ -201,8 +201,8 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q5_1(
         const int iqs8  = k_KQ %  QI8_1;
         const int shift = k_KQ & (QI8_1/2);
 
-        int v = (get_int_b2(K_q5_1[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
-        const int vh = get_int_b2(K_q5_1[ib].qh, 0) >> (iqs8 * QI5_1);
+        int v = (get_int_b4(K_q5_1[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
+        const int vh = get_int_b4(K_q5_1[ib].qh, 0) >> (iqs8 * QI5_1);
         v |= (vh <<  4) & 0x00000010; // 0 ->  4
         v |= (vh << 11) & 0x00001000; // 1 -> 12
         v |= (vh << 18) & 0x00100000; // 2 -> 20
