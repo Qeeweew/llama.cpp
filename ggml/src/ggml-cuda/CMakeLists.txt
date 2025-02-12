@@ -146,6 +146,12 @@ if (CUDAToolkit_FOUND)
         list(APPEND CUDA_FLAGS -Xcompiler ${CUDA_CXX_FLAGS_JOINED})
     endif()
 
+    if(NOT DEFINED CUTLASS_DIR)
+        message(FATAL_ERROR "CUTLASS_DIR is not defined. Please specify it using -DCUTLASS_DIR=/path/to/cutlass")
+    endif()
+
+    include_directories(${CUTLASS_DIR}/include)
+
     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")

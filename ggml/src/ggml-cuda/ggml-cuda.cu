@@ -38,6 +38,7 @@
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv6.cuh"
 #include "ggml-cuda/gla.cuh"
+#include "ggml-cuda/cutlass-gemm.cuh"
 #include "ggml.h"
 
 #include <algorithm>
@@ -1218,22 +1219,21 @@ static void ggml_cuda_op_mul_mat_cublas(
                         CUBLAS_COMPUTE_32F,
                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         } else {
-            ggml_cuda_pool_alloc<half> dst_f16(ctx.pool(id), row_diff*src1_ncols);
 
-            const half alpha_f16 = 1.0f;
-            const half beta_f16 = 0.0f;
-
-            CUBLAS_CHECK(
-                cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
-                        row_diff, src1_ncols, ne10,
-                        &alpha_f16, src0_ptr,      CUDA_R_16F, ne00,
-                                    src1_ptr,      CUDA_R_16F, ne10,
-                        &beta_f16,  dst_f16.get(), CUDA_R_16F, ldc,
-                        CUBLAS_COMPUTE_16F,
-                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-
-            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
-            to_fp32_cuda(dst_f16.get(), dst_dd_i, row_diff*src1_ncols, stream);
+            CUDA_CHECK(
+                HgemmNT(
+                    row_diff, src1_ncols, ne10, src0_ptr, ne00, src1_ptr, ne10, dst_dd_i, ldc,
+                    stream
+                )
+            );
+            // CUBLAS_CHECK(
+            //     cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
+            //             row_diff, src1_ncols, ne10,
+            //             &alpha_f16, src0_ptr,      CUDA_R_16F, ne00,
+            //                         src1_ptr,      CUDA_R_16F, ne10,
+            //             &beta_f16,  dst_f16.get(), CUDA_R_16F, ldc,
+            //             CUBLAS_COMPUTE_16F,
+            //             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         }
     } else {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
