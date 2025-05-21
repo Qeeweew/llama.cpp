@@ -217,6 +217,53 @@ static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t
         y[l + 0] = d1 * (q[l] & 0xF) - m1;
         y[l +32] = d2 * (q[l] >>  4) - m2;
     }
+    // Vectorized computation using float4 or float2
+    if constexpr (std::is_same<dst_t, float>::value) {
+        // Use float4 for single-precision output
+        float4 y0, y1;
+
+        // Compute 4 elements at a time for y0
+        y0.x = d1 * (q[0] & 0xF) - m1;
+        y0.y = d1 * (q[1] & 0xF) - m1;
+        y0.z = d1 * (q[2] & 0xF) - m1;
+        y0.w = d1 * (q[3] & 0xF) - m1;
+
+        // Compute 4 elements at a time for y1
+        y1.x = d2 * (q[0] >> 4) - m2;
+        y1.y = d2 * (q[1] >> 4) - m2;
+        y1.z = d2 * (q[2] >> 4) - m2;
+        y1.w = d2 * (q[3] >> 4) - m2;
+
+        // Store results using float4
+        *((float4*) (y + 0)) = y0;
+        *((float4*) (y + 32)) = y1;
+    } else {
+        // Use float2 for half-precision output
+        float4 y0, y1;
+        float2 y2, y3;
+
+        // Compute 4 elements at a time for y0
+        y0.x = d1 * (q[0] & 0xF) - m1;
+        y0.y = d1 * (q[1] & 0xF) - m1;
+        y0.z = d1 * (q[2] & 0xF) - m1;
+        y0.w = d1 * (q[3] & 0xF) - m1;
+
+        // Compute 4 elements at a time for y1
+        y1.x = d2 * (q[0] >> 4) - m2;
+        y1.y = d2 * (q[1] >> 4) - m2;
+        y1.z = d2 * (q[2] >> 4) - m2;
+        y1.w = d2 * (q[3] >> 4) - m2;
+
+        // Convert float4 to float2 for half-precision storage
+        *((half2*) &y2.x) = __float22half2_rn(make_float2(y0.x, y0.y));
+        *((half2*) &y2.y) = __float22half2_rn(make_float2(y0.z, y0.w));
+        *((half2*) &y3.x) = __float22half2_rn(make_float2(y1.x, y1.y));
+        *((half2*) &y3.y) = __float22half2_rn(make_float2(y1.z, y1.w));
+
+        // Store results using float2
+        *((float2*) (y + 0)) = y2;
+        *((float2*) (y + 32)) = y3;
+    }
 }
 
 template<typename dst_t>

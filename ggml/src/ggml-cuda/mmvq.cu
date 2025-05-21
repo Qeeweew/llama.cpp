@@ -15,8 +15,8 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
         case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1;
         case GGML_TYPE_Q2_K:    return vec_dot_q2_K_q8_1;
         case GGML_TYPE_Q3_K:    return vec_dot_q3_K_q8_1;
-        case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
-        case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
+        case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1_fast;
+        case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1_fast;
         case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1;
         case GGML_TYPE_IQ2_XXS: return vec_dot_iq2_xxs_q8_1;
         case GGML_TYPE_IQ2_XS:  return vec_dot_iq2_xs_q8_1;
@@ -40,8 +40,8 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q8_0:    return VDR_Q8_0_Q8_1_MMVQ;
         case GGML_TYPE_Q2_K:    return VDR_Q2_K_Q8_1_MMVQ;
         case GGML_TYPE_Q3_K:    return VDR_Q3_K_Q8_1_MMVQ;
-        case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
-        case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_K:    return 4;
+        case GGML_TYPE_Q5_K:    return 4;
         case GGML_TYPE_Q6_K:    return VDR_Q6_K_Q8_1_MMVQ;
         case GGML_TYPE_IQ2_XXS: return VDR_IQ2_XXS_Q8_1_MMVQ;
         case GGML_TYPE_IQ2_XS:  return VDR_IQ2_XS_Q8_1_MMVQ;
@@ -148,15 +148,15 @@ static __global__ void mul_mat_vec_q(
     constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
+    constexpr int rows_per_cuda_block = nwarps;
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
-    const     int tid = warp_size*threadIdx.y + threadIdx.x;
-    const     int row0 = rows_per_cuda_block*blockIdx.x;
+    const     int tid = threadIdx.x;
+    const     int row = rows_per_cuda_block*blockIdx.x + threadIdx.y;
     const     int blocks_per_row_x = ncols_x / qk;
-    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+    constexpr int blocks_per_iter = vdr * warp_size / qi;
 
     // The MUL_MAT_ID code path with ids != nullptr is only implemented for ncols_dst == 1.
     const int channel_dst = blockIdx.y;
@@ -167,10 +167,10 @@ static __global__ void mul_mat_vec_q(
     const int sample_y    = sample_dst;
 
     // partial sum for each thread
-    float tmp[ncols_dst][rows_per_cuda_block] = {{0.0f}};
+    float tmp[ncols_dst] = {{0.0f}};
 
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
-    const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
+    const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row*stride_row_x;
 
     for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
@@ -181,44 +181,29 @@ static __global__ void mul_mat_vec_q(
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp[j][i] += vec_dot_q_cuda(
-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
-            }
+            tmp[j] += vec_dot_q_cuda(
+                vx, &y[j*stride_col_y + kby], kbx_offset + kbx, kqs);
         }
     }
 
-    __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][ncols_dst][rows_per_cuda_block][warp_size];
-    if (threadIdx.y > 0) {
+    __shared__ float tmp_shared[ncols_dst][rows_per_cuda_block];
+
 #pragma unroll
-        for (int j = 0; j < ncols_dst; ++j) {
-#pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
-            }
-        }
+    for (int j = 0; j < ncols_dst; ++j) {
+        tmp_shared[j][threadIdx.y] = warp_reduce_sum<warp_size>(tmp[j]);
     }
     __syncthreads();
     if (threadIdx.y > 0) {
         return;
     }
 
-    dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
+    dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row;
 
     // sum up partial sums and write back result
 #pragma unroll
     for (int j = 0; j < ncols_dst; ++j) {
-#pragma unroll
-        for (int i = 0; i < rows_per_cuda_block; ++i) {
-#pragma unroll
-            for (int l = 0; l < nwarps-1; ++l) {
-                tmp[j][i] += tmp_shared[l][j][i][threadIdx.x];
-            }
-            tmp[j][i] = warp_reduce_sum<warp_size>(tmp[j][i]);
-        }
-
-        if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || row0 + int(threadIdx.x) < stride_col_dst)) {
-            dst[j*stride_col_dst + threadIdx.x] = tmp[j][threadIdx.x];
+        if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || row + int(threadIdx.x) < stride_col_dst)) {
+            dst[j*stride_col_dst + threadIdx.x] = tmp_shared[j][threadIdx.x];
         }
     }
 }
@@ -226,9 +211,10 @@ static __global__ void mul_mat_vec_q(
 static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_y, const int nsamples_y,
         const int warp_size, const mmvq_parameter_table_id table_id) {
-    const int64_t nblocks = (nrows_x + calc_rows_per_block(ncols_dst, table_id) - 1) / calc_rows_per_block(ncols_dst, table_id);
+    const int64_t nwarps = calc_nwarps(ncols_dst, table_id);
+    const int64_t nblocks = (nrows_x + nwarps - 1) / nwarps;
     const dim3 block_nums(nblocks, nchannels_y, nsamples_y);
-    const dim3 block_dims(warp_size, calc_nwarps(ncols_dst, table_id), 1);
+    const dim3 block_dims(warp_size, nwarps, 1);
     return {block_nums, block_dims};
 }
 

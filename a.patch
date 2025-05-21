@@ -1,0 +1,285 @@
+diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
+index c6dec427..bd8b4c09 100644
+--- a/ggml/src/ggml-cuda/convert.cu
++++ b/ggml/src/ggml-cuda/convert.cu
+@@ -217,6 +217,53 @@ static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t
+         y[l + 0] = d1 * (q[l] & 0xF) - m1;
+         y[l +32] = d2 * (q[l] >>  4) - m2;
+     }
++    // Vectorized computation using float4 or float2
++    if constexpr (std::is_same<dst_t, float>::value) {
++        // Use float4 for single-precision output
++        float4 y0, y1;
++
++        // Compute 4 elements at a time for y0
++        y0.x = d1 * (q[0] & 0xF) - m1;
++        y0.y = d1 * (q[1] & 0xF) - m1;
++        y0.z = d1 * (q[2] & 0xF) - m1;
++        y0.w = d1 * (q[3] & 0xF) - m1;
++
++        // Compute 4 elements at a time for y1
++        y1.x = d2 * (q[0] >> 4) - m2;
++        y1.y = d2 * (q[1] >> 4) - m2;
++        y1.z = d2 * (q[2] >> 4) - m2;
++        y1.w = d2 * (q[3] >> 4) - m2;
++
++        // Store results using float4
++        *((float4*) (y + 0)) = y0;
++        *((float4*) (y + 32)) = y1;
++    } else {
++        // Use float2 for half-precision output
++        float4 y0, y1;
++        float2 y2, y3;
++
++        // Compute 4 elements at a time for y0
++        y0.x = d1 * (q[0] & 0xF) - m1;
++        y0.y = d1 * (q[1] & 0xF) - m1;
++        y0.z = d1 * (q[2] & 0xF) - m1;
++        y0.w = d1 * (q[3] & 0xF) - m1;
++
++        // Compute 4 elements at a time for y1
++        y1.x = d2 * (q[0] >> 4) - m2;
++        y1.y = d2 * (q[1] >> 4) - m2;
++        y1.z = d2 * (q[2] >> 4) - m2;
++        y1.w = d2 * (q[3] >> 4) - m2;
++
++        // Convert float4 to float2 for half-precision storage
++        *((half2*) &y2.x) = __float22half2_rn(make_float2(y0.x, y0.y));
++        *((half2*) &y2.y) = __float22half2_rn(make_float2(y0.z, y0.w));
++        *((half2*) &y3.x) = __float22half2_rn(make_float2(y1.x, y1.y));
++        *((half2*) &y3.y) = __float22half2_rn(make_float2(y1.z, y1.w));
++
++        // Store results using float2
++        *((float2*) (y + 0)) = y2;
++        *((float2*) (y + 32)) = y3;
++    }
+ }
+ 
+ template<typename dst_t>
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 42302e4e..2a949c53 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -45,7 +45,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+-#include <charconv>
++// #include <charconv>
+ #include <cinttypes>
+ #include <cstddef>
+ #include <cstdint>
+@@ -1537,7 +1537,7 @@ static void ggml_cuda_op_mul_mat(
+         // If src0 is on a temporary compute buffer (partial offloading) there may be some padding that needs to be cleared:
+         if (ne00 % MATRIX_ROW_PADDING != 0 && ggml_is_quantized(src0->type) && ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE && src0->view_src == nullptr) {
+             GGML_ASSERT(ggml_is_contiguously_allocated(src0));
+-            GGML_ASSERT(!src0->view_src);
++            // GGML_ASSERT(!src0->view_src);
+             const size_t nbytes_data    = ggml_row_size(src0->type, (dev[id].row_high - dev[id].row_low)*ne00);
+             const size_t nbytes_padding = ggml_row_size(src0->type, MATRIX_ROW_PADDING - ne00 % MATRIX_ROW_PADDING);
+             CUDA_CHECK(cudaMemsetAsync(dev[id].src0_dd + nbytes_data, 0, nbytes_padding, stream));
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index 3b313ea2..37993a92 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -15,8 +15,8 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type)
+         case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1;
+         case GGML_TYPE_Q2_K:    return vec_dot_q2_K_q8_1;
+         case GGML_TYPE_Q3_K:    return vec_dot_q3_K_q8_1;
+-        case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
+-        case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
++        case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1_fast;
++        case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1_fast;
+         case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1;
+         case GGML_TYPE_IQ2_XXS: return vec_dot_iq2_xxs_q8_1;
+         case GGML_TYPE_IQ2_XS:  return vec_dot_iq2_xs_q8_1;
+@@ -40,8 +40,8 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
+         case GGML_TYPE_Q8_0:    return VDR_Q8_0_Q8_1_MMVQ;
+         case GGML_TYPE_Q2_K:    return VDR_Q2_K_Q8_1_MMVQ;
+         case GGML_TYPE_Q3_K:    return VDR_Q3_K_Q8_1_MMVQ;
+-        case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
+-        case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
++        case GGML_TYPE_Q4_K:    return 4;
++        case GGML_TYPE_Q5_K:    return 4;
+         case GGML_TYPE_Q6_K:    return VDR_Q6_K_Q8_1_MMVQ;
+         case GGML_TYPE_IQ2_XXS: return VDR_IQ2_XXS_Q8_1_MMVQ;
+         case GGML_TYPE_IQ2_XS:  return VDR_IQ2_XS_Q8_1_MMVQ;
+@@ -148,15 +148,15 @@ static __global__ void mul_mat_vec_q(
+     constexpr int vdr = get_vdr_mmvq(type);
+     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
+-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
++    constexpr int rows_per_cuda_block = nwarps;
+     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+ 
+     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+ 
+-    const     int tid = warp_size*threadIdx.y + threadIdx.x;
+-    const     int row0 = rows_per_cuda_block*blockIdx.x;
++    const     int tid = threadIdx.x;
++    const     int row = rows_per_cuda_block*blockIdx.x + threadIdx.y;
+     const     int blocks_per_row_x = ncols_x / qk;
+-    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
++    constexpr int blocks_per_iter = vdr * warp_size / qi;
+ 
+     // The MUL_MAT_ID code path with ids != nullptr is only implemented for ncols_dst == 1.
+     const int channel_dst = blockIdx.y;
+@@ -167,10 +167,10 @@ static __global__ void mul_mat_vec_q(
+     const int sample_y    = sample_dst;
+ 
+     // partial sum for each thread
+-    float tmp[ncols_dst][rows_per_cuda_block] = {{0.0f}};
++    float tmp[ncols_dst] = {{0.0f}};
+ 
+     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
+-    const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
++    const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row*stride_row_x;
+ 
+     for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+         const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+@@ -181,44 +181,29 @@ static __global__ void mul_mat_vec_q(
+ #pragma unroll
+         for (int j = 0; j < ncols_dst; ++j) {
+ #pragma unroll
+-            for (int i = 0; i < rows_per_cuda_block; ++i) {
+-                tmp[j][i] += vec_dot_q_cuda(
+-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+-            }
++            tmp[j] += vec_dot_q_cuda(
++                vx, &y[j*stride_col_y + kby], kbx_offset + kbx, kqs);
+         }
+     }
+ 
+-    __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][ncols_dst][rows_per_cuda_block][warp_size];
+-    if (threadIdx.y > 0) {
+-#pragma unroll
+-        for (int j = 0; j < ncols_dst; ++j) {
++    __shared__ float tmp_shared[ncols_dst][rows_per_cuda_block];
++
+ #pragma unroll
+-            for (int i = 0; i < rows_per_cuda_block; ++i) {
+-                tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+-            }
+-        }
++    for (int j = 0; j < ncols_dst; ++j) {
++        tmp_shared[j][threadIdx.y] = warp_reduce_sum<warp_size>(tmp[j]);
+     }
+     __syncthreads();
+     if (threadIdx.y > 0) {
+         return;
+     }
+ 
+-    dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
++    dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row;
+ 
+     // sum up partial sums and write back result
+ #pragma unroll
+     for (int j = 0; j < ncols_dst; ++j) {
+-#pragma unroll
+-        for (int i = 0; i < rows_per_cuda_block; ++i) {
+-#pragma unroll
+-            for (int l = 0; l < nwarps-1; ++l) {
+-                tmp[j][i] += tmp_shared[l][j][i][threadIdx.x];
+-            }
+-            tmp[j][i] = warp_reduce_sum<warp_size>(tmp[j][i]);
+-        }
+-
+-        if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || row0 + int(threadIdx.x) < stride_col_dst)) {
+-            dst[j*stride_col_dst + threadIdx.x] = tmp[j][threadIdx.x];
++        if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || row + int(threadIdx.x) < stride_col_dst)) {
++            dst[j*stride_col_dst + threadIdx.x] = tmp_shared[j][threadIdx.x];
+         }
+     }
+ }
+@@ -226,9 +211,10 @@ static __global__ void mul_mat_vec_q(
+ static std::pair<dim3, dim3> calc_launch_params(
+         const int ncols_dst, const int nrows_x, const int nchannels_y, const int nsamples_y,
+         const int warp_size, const mmvq_parameter_table_id table_id) {
+-    const int64_t nblocks = (nrows_x + calc_rows_per_block(ncols_dst, table_id) - 1) / calc_rows_per_block(ncols_dst, table_id);
++    const int64_t nwarps = calc_nwarps(ncols_dst, table_id);
++    const int64_t nblocks = (nrows_x + nwarps - 1) / nwarps;
+     const dim3 block_nums(nblocks, nchannels_y, nsamples_y);
+-    const dim3 block_dims(warp_size, calc_nwarps(ncols_dst, table_id), 1);
++    const dim3 block_dims(warp_size, nwarps, 1);
+     return {block_nums, block_dims};
+ }
+ 
+diff --git a/ggml/src/ggml-cuda/vecdotq.cuh b/ggml/src/ggml-cuda/vecdotq.cuh
+index ba195e1d..c05a699a 100644
+--- a/ggml/src/ggml-cuda/vecdotq.cuh
++++ b/ggml/src/ggml-cuda/vecdotq.cuh
+@@ -716,6 +716,34 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
+     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, bq4_K->dm, d8);
+ }
+ 
++static __device__ __forceinline__ float vec_dot_q4_K_q8_1_fast(
++    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
++
++    const block_q4_K * bq4_K = (const block_q4_K *) vbq + kbx;
++    const int i_block = iqs / 4;
++
++    uint8_t sc, m4;
++    const uint8_t* q = bq4_K->scales;
++    if (i_block < 4) {
++        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
++    } else {
++        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
++        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
++    }
++    const int* v = (const int*) bq4_K->qs + i_block / 2 * 8;
++    const int* q8 = (const int*) bq8_1[i_block].qs;
++    int dot_sum = 0;
++#pragma unroll
++    for (int j = 0;j < 8;j++) {
++        dot_sum = ggml_cuda_dp4a(q8[j],(v[j] >> (iqs&4)) & 0x0f0f0f0f, dot_sum);
++    }
++    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
++    const float2 dm4f = __half22float2(bq4_K->dm);
++    float sumf_d = ds8f.x * (dot_sum * sc);
++    float sumf_m = ds8f.y * m4;
++    return dm4f.x * sumf_d - dm4f.y * sumf_m;
++}
++
+ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+ 
+@@ -762,6 +790,39 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+     return vec_dot_q5_K_q8_1_impl_vmmq(vl, vh, u, sc, m, bq5_K->dm, d8);
+ }
+ 
++static __device__ __forceinline__ float vec_dot_q5_K_q8_1_fast(
++    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
++
++    const block_q5_K * bq5_K = (const block_q5_K *) vbq + kbx;
++    const int i_block = iqs / 4;
++
++    uint8_t sc, m4;
++    const uint8_t* q = bq5_K->scales;
++    if (i_block < 4) {
++        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
++    } else {
++        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
++        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
++    }
++    const int* ql = (const int*) bq5_K->qs + i_block / 2 * 8;
++    const int* qh = (const int*) bq5_K->qh;
++    const int* q8 = (const int*) bq8_1[i_block].qs;
++    int dot_sum = 0;
++#pragma unroll
++    for (int j = 0;j < 8;j++) {
++        dot_sum = ggml_cuda_dp4a(
++            q8[j],
++            ((ql[j] >> (iqs&4)) & 0x0f0f0f0f) | (((qh[j] >> i_block) << 4) & 0x10101010),
++            dot_sum
++        );
++    }
++    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
++    const float2 dm4f = __half22float2(bq5_K->dm);
++    float sumf_d = ds8f.x * (dot_sum * sc);
++    float sumf_m = ds8f.y * m4;
++    return dm4f.x * sumf_d - dm4f.y * sumf_m;
++}
++
+ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
+     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+ 

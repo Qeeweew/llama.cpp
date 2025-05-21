@@ -1,0 +1,513 @@
+diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
+index 119fd39b..e2717e83 100644
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -146,6 +146,12 @@ if (CUDAToolkit_FOUND)
+         list(APPEND CUDA_FLAGS -Xcompiler ${CUDA_CXX_FLAGS_JOINED})
+     endif()
+ 
++    if(NOT DEFINED CUTLASS_DIR)
++        message(FATAL_ERROR "CUTLASS_DIR is not defined. Please specify it using -DCUTLASS_DIR=/path/to/cutlass")
++    endif()
++
++    include_directories(${CUTLASS_DIR}/include)
++
+     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
+ else()
+     message(FATAL_ERROR "CUDA Toolkit not found")
+diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
+index 795b720d..e917d956 100644
+--- a/ggml/src/ggml-cuda/convert.cu
++++ b/ggml/src/ggml-cuda/convert.cu
+@@ -211,9 +211,53 @@ static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t
+     const float d1 = dall * sc; const float m1 = dmin * m;
+     get_scale_min_k4(is + 1, x[i].scales, sc, m);
+     const float d2 = dall * sc; const float m2 = dmin * m;
+-    for (int l = 0; l < n; ++l) {
+-        y[l + 0] = d1 * (q[l] & 0xF) - m1;
+-        y[l +32] = d2 * (q[l] >>  4) - m2;
++
++    // Vectorized computation using float4 or float2
++    if constexpr (std::is_same<dst_t, float>::value) {
++        // Use float4 for single-precision output
++        float4 y0, y1;
++
++        // Compute 4 elements at a time for y0
++        y0.x = d1 * (q[0] & 0xF) - m1;
++        y0.y = d1 * (q[1] & 0xF) - m1;
++        y0.z = d1 * (q[2] & 0xF) - m1;
++        y0.w = d1 * (q[3] & 0xF) - m1;
++
++        // Compute 4 elements at a time for y1
++        y1.x = d2 * (q[0] >> 4) - m2;
++        y1.y = d2 * (q[1] >> 4) - m2;
++        y1.z = d2 * (q[2] >> 4) - m2;
++        y1.w = d2 * (q[3] >> 4) - m2;
++
++        // Store results using float4
++        *((float4*) (y + 0)) = y0;
++        *((float4*) (y + 32)) = y1;
++    } else {
++        // Use float2 for half-precision output
++        float4 y0, y1;
++        float2 y2, y3;
++
++        // Compute 4 elements at a time for y0
++        y0.x = d1 * (q[0] & 0xF) - m1;
++        y0.y = d1 * (q[1] & 0xF) - m1;
++        y0.z = d1 * (q[2] & 0xF) - m1;
++        y0.w = d1 * (q[3] & 0xF) - m1;
++
++        // Compute 4 elements at a time for y1
++        y1.x = d2 * (q[0] >> 4) - m2;
++        y1.y = d2 * (q[1] >> 4) - m2;
++        y1.z = d2 * (q[2] >> 4) - m2;
++        y1.w = d2 * (q[3] >> 4) - m2;
++
++        // Convert float4 to float2 for half-precision storage
++        *((half2*) &y2.x) = __float22half2_rn(make_float2(y0.x, y0.y));
++        *((half2*) &y2.y) = __float22half2_rn(make_float2(y0.z, y0.w));
++        *((half2*) &y3.x) = __float22half2_rn(make_float2(y1.x, y1.y));
++        *((half2*) &y3.y) = __float22half2_rn(make_float2(y1.z, y1.w));
++
++        // Store results using float2
++        *((float2*) (y + 0)) = y2;
++        *((float2*) (y + 32)) = y3;
+     }
+ }
+ 
+@@ -446,11 +490,40 @@ static __global__ void dequantize_block_iq4_xs(const void * __restrict__ vx, dst
+     const int64_t il = tid/8; // 0...3
+     const int64_t ib = tid%8; // 0...7
+     dst_t * y = yy + i*QK_K + 32*ib + 4*il;
+-    const uint8_t  * q4 = x[i].qs + 16*ib + 4*il;
++    const uint32_t q4 = *((uint32_t *) (x[i].qs + 16*ib + 4*il));
+     const float d = (float)x[i].d * ((((x[i].scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((x[i].scales_h >> 2*ib) & 3) << 4)) - 32);
+-    for (int j = 0; j < 4; ++j) {
+-        y[j+ 0] = d * kvalues_iq4nl[q4[j] & 0xf];
+-        y[j+16] = d * kvalues_iq4nl[q4[j] >>  4];
++
++    float4 y0, y1;
++    int v1, v2, v3, v4;
++    uint32_t mask;
++
++    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
++    mask = (0x32103210 | ((q4 & 0x88888888) >> 1));
++    v1 = __byte_perm(values[0], values[1], q4);
++    v2 = __byte_perm(values[2], values[3], q4);
++    v3 = __byte_perm(v1, v2, mask);
++    v1 = __byte_perm(values[0], values[1], q4 >> 16);
++    v2 = __byte_perm(values[2], values[3], q4 >> 16);
++    v4 = __byte_perm(v1, v2, mask >> 16);
++    int8_t* q8_l = (int8_t *) &v3;
++    int8_t* q8_h = (int8_t *) &v4;
++
++    y0.x = d * q8_l[0]; y1.x = d * q8_l[1];
++    y0.y = d * q8_l[2]; y1.y = d * q8_l[3];
++    y0.z = d * q8_h[0]; y1.z = d * q8_h[1];
++    y0.w = d * q8_h[2]; y1.w = d * q8_h[3];
++
++    if constexpr(std::is_same<dst_t, float>::value) {
++        *((float4*) (y +  0)) = y0;
++        *((float4*) (y + 16)) = y1;
++    } else {
++        float2 y2, y3;
++        *((half2*) &y2.x) = __float22half2_rn(make_float2(y0.x, y0.y));
++        *((half2*) &y2.y) = __float22half2_rn(make_float2(y0.z, y0.w));
++        *((half2*) &y3.x) = __float22half2_rn(make_float2(y1.x, y1.y));
++        *((half2*) &y3.y) = __float22half2_rn(make_float2(y1.z, y1.w));
++        *((float2*) (y +  0)) = y2;
++        *((float2*) (y + 16)) = y3;
+     }
+ }
+ 
+diff --git a/ggml/src/ggml-cuda/cutlass-gemm.cuh b/ggml/src/ggml-cuda/cutlass-gemm.cuh
+new file mode 100644
+index 00000000..23182a10
+--- /dev/null
++++ b/ggml/src/ggml-cuda/cutlass-gemm.cuh
+@@ -0,0 +1,75 @@
++#include "cutlass/gemm/device/gemm.h"
++#include "cutlass/layout/matrix.h"
++
++using ColumnMajor = cutlass::layout::ColumnMajor;
++using RowMajor = cutlass::layout::RowMajor;
++
++// 定义 GEMM 配置
++using ElementInput = cutlass::half_t;  // 输入数据类型 (FP16)
++using ElementOutput = cutlass::half_t; // 输出数据类型 (FP16)
++using ElementCompute = cutlass::half_t;
++
++using GemmTN = cutlass::gemm::device::Gemm<
++    cutlass::half_t, cutlass::layout::RowMajor,    // A: RowMajor
++    cutlass::half_t, cutlass::layout::ColumnMajor, // B: ColumnMajor
++    float, cutlass::layout::ColumnMajor, // C/D: ColumnMajor
++    cutlass::half_t,
++    cutlass::arch::OpClassSimt,
++    cutlass::arch::Sm60,
++    cutlass::gemm::GemmShape<128, 128, 8>,
++    cutlass::gemm::GemmShape<64, 64, 8>,
++    cutlass::gemm::GemmShape<1, 1, 1>,
++    cutlass::epilogue::thread::Convert<
++      float,
++      1,
++      cutlass::half_t
++    >
++>;
++
++// Define a CUTLASS GEMM template and launch a GEMM kernel.
++cudaError_t HgemmNT(
++  int M,
++  int N,
++  int K,
++  half const *A,
++  int lda,
++  half const *B,
++  int ldb,
++  float *C,
++  int ldc,
++  cudaStream_t stream
++) {
++
++  GemmTN gemm_operator;
++
++  // Cast the pointers to cutlass::half_t
++  using TensorRefA = cutlass::TensorRef<const cutlass::half_t, RowMajor>;
++  using TensorRefB = cutlass::TensorRef<const cutlass::half_t, ColumnMajor>;
++  using TensorRefC = cutlass::TensorRef<float, ColumnMajor>;
++  using TensorRefD = cutlass::TensorRef<float, ColumnMajor>;
++  cutlass::gemm::GemmCoord problem_size(M, N, K);
++
++  TensorRefA tensor_a(reinterpret_cast<cutlass::half_t const *>(A), lda);
++  TensorRefB tensor_b(reinterpret_cast<cutlass::half_t const *>(B), ldb);
++  TensorRefC tensor_c(C, ldc);
++  TensorRefD tensor_d(C, ldc); // Destination matrix D shares the same memory as C
++
++  // Construct the Arguments object
++  GemmTN::Arguments args(problem_size,// Gemm Problem dimensions
++                         tensor_a,    // Tensor-ref for source matrix A
++                         tensor_b,    // Tensor-ref for source matrix B
++                         tensor_c,    // Tensor-ref for source matrix C
++                         tensor_d    // Tensor-ref for destination matrix D
++                );
++
++  // Launch the CUTLASS GEMM kernel.
++  cutlass::Status status = gemm_operator(args, nullptr, stream);
++
++  // Return a cudaError_t if the CUTLASS GEMM operator returned an error code.
++  if (status != cutlass::Status::kSuccess) {
++    return cudaErrorUnknown;
++  }
++
++  // Return success, if no errors were encountered.
++  return cudaSuccess;
++}
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index d40ee2da..0ec4a4ce 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -201,8 +201,8 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q5_1(
+         const int iqs8  = k_KQ %  QI8_1;
+         const int shift = k_KQ & (QI8_1/2);
+ 
+-        int v = (get_int_b2(K_q5_1[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
+-        const int vh = get_int_b2(K_q5_1[ib].qh, 0) >> (iqs8 * QI5_1);
++        int v = (get_int_b4(K_q5_1[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
++        const int vh = get_int_b4(K_q5_1[ib].qh, 0) >> (iqs8 * QI5_1);
+         v |= (vh <<  4) & 0x00000010; // 0 ->  4
+         v |= (vh << 11) & 0x00001000; // 1 -> 12
+         v |= (vh << 18) & 0x00100000; // 2 -> 20
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index c95728b0..811f8645 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -38,12 +38,13 @@
+ #include "ggml-cuda/upscale.cuh"
+ #include "ggml-cuda/wkv6.cuh"
+ #include "ggml-cuda/gla.cuh"
++#include "ggml-cuda/cutlass-gemm.cuh"
+ #include "ggml.h"
+ 
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+-#include <charconv>
++// #include <charconv>
+ #include <cinttypes>
+ #include <cstddef>
+ #include <cstdint>
+@@ -1182,7 +1183,7 @@ static void ggml_cuda_op_mul_mat_cublas(
+ 
+     const bool use_fp16 = (src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && ggml_is_contiguous(src0) && row_diff == src0->ne[1] && dst->op_params[0] == GGML_PREC_DEFAULT;
+ 
+-    if (compute_capability >= GGML_CUDA_CC_VOLTA && use_fp16) {
++    if ((compute_capability >= GGML_CUDA_CC_VOLTA || compute_capability == GGML_CUDA_CC_PASCAL) && use_fp16) {
+         // convert src0 and src1 to fp16, multiply as fp16, convert dst to fp32
+         ggml_cuda_pool_alloc<half> src0_as_f16(ctx.pool(id));
+         if (src0->type != GGML_TYPE_F16) {
+@@ -1218,22 +1219,21 @@ static void ggml_cuda_op_mul_mat_cublas(
+                         CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+         } else {
+-            ggml_cuda_pool_alloc<half> dst_f16(ctx.pool(id), row_diff*src1_ncols);
+ 
+-            const half alpha_f16 = 1.0f;
+-            const half beta_f16 = 0.0f;
+-
+-            CUBLAS_CHECK(
+-                cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
+-                        row_diff, src1_ncols, ne10,
+-                        &alpha_f16, src0_ptr,      CUDA_R_16F, ne00,
+-                                    src1_ptr,      CUDA_R_16F, ne10,
+-                        &beta_f16,  dst_f16.get(), CUDA_R_16F, ldc,
+-                        CUBLAS_COMPUTE_16F,
+-                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+-
+-            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
+-            to_fp32_cuda(dst_f16.get(), dst_dd_i, row_diff*src1_ncols, stream);
++            CUDA_CHECK(
++                HgemmNT(
++                    row_diff, src1_ncols, ne10, src0_ptr, ne00, src1_ptr, ne10, dst_dd_i, ldc,
++                    stream
++                )
++            );
++            // CUBLAS_CHECK(
++            //     cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
++            //             row_diff, src1_ncols, ne10,
++            //             &alpha_f16, src0_ptr,      CUDA_R_16F, ne00,
++            //                         src1_ptr,      CUDA_R_16F, ne10,
++            //             &beta_f16,  dst_f16.get(), CUDA_R_16F, ldc,
++            //             CUBLAS_COMPUTE_16F,
++            //             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+         }
+     } else {
+         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index 4fb466ca..6a94b4fc 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -11,8 +11,8 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type)
+         type == GGML_TYPE_Q8_0 ? vec_dot_q8_0_q8_1 :
+         type == GGML_TYPE_Q2_K ? vec_dot_q2_K_q8_1 :
+         type == GGML_TYPE_Q3_K ? vec_dot_q3_K_q8_1 :
+-        type == GGML_TYPE_Q4_K ? vec_dot_q4_K_q8_1 :
+-        type == GGML_TYPE_Q5_K ? vec_dot_q5_K_q8_1 :
++        type == GGML_TYPE_Q4_K ? vec_dot_q4_K_q8_1_fast :
++        type == GGML_TYPE_Q5_K ? vec_dot_q5_K_q8_1_fast :
+         type == GGML_TYPE_Q6_K ? vec_dot_q6_K_q8_1 :
+         type == GGML_TYPE_IQ2_XXS ? vec_dot_iq2_xxs_q8_1 :
+         type == GGML_TYPE_IQ2_XS ? vec_dot_iq2_xs_q8_1 :
+@@ -34,8 +34,8 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
+         type == GGML_TYPE_Q8_0    ? VDR_Q8_0_Q8_1_MMVQ :
+         type == GGML_TYPE_Q2_K    ? VDR_Q2_K_Q8_1_MMVQ :
+         type == GGML_TYPE_Q3_K    ? VDR_Q3_K_Q8_1_MMVQ :
+-        type == GGML_TYPE_Q4_K    ? VDR_Q4_K_Q8_1_MMVQ :
+-        type == GGML_TYPE_Q5_K    ? VDR_Q5_K_Q8_1_MMVQ :
++        type == GGML_TYPE_Q4_K    ? 4:
++        type == GGML_TYPE_Q5_K    ? 4:
+         type == GGML_TYPE_Q6_K    ? VDR_Q6_K_Q8_1_MMVQ :
+         type == GGML_TYPE_IQ2_XXS ? VDR_IQ2_XXS_Q8_1_MMVQ :
+         type == GGML_TYPE_IQ2_XS  ? VDR_IQ2_XS_Q8_1_MMVQ :
+@@ -129,10 +129,93 @@ static __global__ void mul_mat_vec_q(
+     }
+ }
+ 
++template <ggml_type type>
++#if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
++// tell the compiler to use as many registers as it wants, see nwarps definition below
++__launch_bounds__(4*WARP_SIZE, 1)
++#endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
++static __global__ void mul_mat_vec_q_fast(
++    const void * __restrict__ vx, const void * __restrict__ vy, float * __restrict__ dst,
++    const int ncols_x, const int nrows_x, const int nrows_dst) {
++
++    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
++
++    // blockDim.x = 32 && blockDim.y = 4
++    constexpr int qk = 256;
++    constexpr int qi = 32;
++    constexpr int vdr = 4;
++    constexpr int nwarps = 4;
++    constexpr int blocks_per_iter = vdr * WARP_SIZE / qi;
++
++    const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
++    const int row = nwarps * blockIdx.x +  threadIdx.y;
++    const int blocks_per_row_x = ncols_x / qk;
++
++    // partial sum for each thread
++    float acc = 0.0f;
++
++    const block_q8_1 * y = (const block_q8_1 *) vy;
++
++    __shared__ block_q8_1 y_shared[blocks_per_iter * (qk/QK8_1)];
++    float* buf = (float *)y_shared;
++    const int kqs = vdr * (threadIdx.x % (qi/vdr));
++    const int kbx_offset = threadIdx.x / (qi/vdr);
++    static_assert(sizeof(block_q8_1) * (qk/QK8_1) % 16 == 0);
++    const int blocks_per_row_x0 = blocks_per_row_x - blocks_per_row_x % blocks_per_iter;
++    for (int kbx = 0; kbx < blocks_per_row_x0; kbx += blocks_per_iter) {
++        const float* y_col = (const float* )&y[kbx * (qk/QK8_1)];
++        buf[tid] = y_col[tid];
++        buf[tid + 128] = y_col[tid + 128];
++        if (threadIdx.y == 0) {
++            buf[tid + 256] = y_col[tid + 256];
++        }
++        __syncthreads();
++        acc += vec_dot_q_cuda(
++            vx,
++            &y_shared[kbx_offset * (qk/QK8_1)],
++            kbx + kbx_offset + row*blocks_per_row_x, kqs);
++        __syncthreads();
++    }
++
++    __shared__ float dst_shared[nwarps];
++
++    acc = warp_reduce_sum(acc);
++    if (threadIdx.x == 0) {
++        dst_shared[threadIdx.y] = acc;
++    }
++    __syncthreads();
++    const int blocks_count = blocks_per_row_x - blocks_per_row_x0;
++    const int row0 = nwarps * blockIdx.x;
++    const int row_delta = threadIdx.x / (qi/vdr);
++    if (threadIdx.y < blocks_count) {
++        const int kbx = blocks_per_row_x0 + threadIdx.y;
++        float tmp = vec_dot_q_cuda(vx, &y[kbx * (qk/QK8_1)], kbx + (row0+row_delta)*blocks_per_row_x, kqs);
++        tmp += __shfl_xor_sync(0xffffffff, tmp, 4, 8);
++        tmp += __shfl_xor_sync(0xffffffff, tmp, 2, 8);
++        tmp += __shfl_xor_sync(0xffffffff, tmp, 1, 8);
++        if (kqs == 0) {
++            atomicAdd(&dst_shared[row_delta], tmp);
++        }
++    }
++    __syncthreads();
++    if (threadIdx.y == 0 && kqs == 0) {
++        dst[row_delta + row0] = dst_shared[row_delta];
++    }
++}
++
+ template <ggml_type type>
+ static void mul_mat_vec_q_cuda(
+     const void * vx, const void * vy, float * dst,
+     const int ncols_x, const int nrows_x, const int nrows_y, const int ncols_y, const int nrows_dst, cudaStream_t stream) {
++    
++    if (ncols_y == 1 && nrows_x % 4 == 0 && 
++        (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K || type == GGML_TYPE_IQ4_XS)) {
++        const int nblocks = nrows_x / 4;
++        const dim3 block_nums(nblocks, 1, 1);
++        const dim3 block_dims(WARP_SIZE, 4, 1);
++        mul_mat_vec_q_fast<type><<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_dst);
++        return;
++    }
+ 
+     GGML_ASSERT(ncols_x % ggml_blck_size(type) == 0);
+     GGML_ASSERT(ncols_y <= MMVQ_MAX_BATCH_SIZE);
+diff --git a/ggml/src/ggml-cuda/vecdotq.cuh b/ggml/src/ggml-cuda/vecdotq.cuh
+index 40091a0e..d7543260 100644
+--- a/ggml/src/ggml-cuda/vecdotq.cuh
++++ b/ggml/src/ggml-cuda/vecdotq.cuh
+@@ -668,6 +668,34 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
+     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
+ }
+ 
++static __device__ __forceinline__ float vec_dot_q4_K_q8_1_fast(
++    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
++
++    const block_q4_K * bq4_K = (const block_q4_K *) vbq + kbx;
++    const int i_block = iqs / 4;
++
++    uint8_t sc, m4;
++    const uint8_t* q = bq4_K->scales;
++    if (i_block < 4) {
++        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
++    } else {
++        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
++        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
++    }
++    const int* v = (const int*) bq4_K->qs + i_block / 2 * 8;
++    const int* q8 = (const int*) bq8_1[i_block].qs;
++    int dot_sum = 0;
++#pragma unroll
++    for (int j = 0;j < 8;j++) {
++        dot_sum = ggml_cuda_dp4a(q8[j], (v[j] >> (iqs&4)) & 0x0f0f0f0f, dot_sum);
++    }
++    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
++    const float2 dm4f = __half22float2(bq4_K->dm);
++    float sumf_d = ds8f.x * (dot_sum * sc);
++    float sumf_m = ds8f.y * m4;
++    return dm4f.x * sumf_d - dm4f.y * sumf_m;
++}
++
+ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
+     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+ 
+@@ -714,6 +742,39 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
+     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, bq4_K->dm, d8);
+ }
+ 
++static __device__ __forceinline__ float vec_dot_q5_K_q8_1_fast(
++    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
++
++    const block_q5_K * bq5_K = (const block_q5_K *) vbq + kbx;
++    const int i_block = iqs / 4;
++
++    uint8_t sc, m4;
++    const uint8_t* q = bq5_K->scales;
++    if (i_block < 4) {
++        sc = q[i_block] & 63; m4 = q[i_block + 4] & 63;
++    } else {
++        sc = (q[i_block+4] & 0xF) | ((q[i_block-4] >> 6) << 4);
++        m4 = (q[i_block+4] >>  4) | ((q[i_block-0] >> 6) << 4);
++    }
++    const int* ql = (const int*) bq5_K->qs + i_block / 2 * 8;
++    const int* qh = (const int*) bq5_K->qh;
++    const int* q8 = (const int*) bq8_1[i_block].qs;
++    int dot_sum = 0;
++#pragma unroll
++    for (int j = 0;j < 8;j++) {
++        dot_sum = ggml_cuda_dp4a(
++            q8[j], 
++            ((ql[j] >> (iqs&4)) & 0x0f0f0f0f) | (((qh[j] >> i_block) << 4) & 0x10101010),
++            dot_sum
++        );
++    }
++    const float2 ds8f = __half22float2(bq8_1[i_block].ds);
++    const float2 dm4f = __half22float2(bq5_K->dm);
++    float sumf_d = ds8f.x * (dot_sum * sc);
++    float sumf_m = ds8f.y * m4;
++    return dm4f.x * sumf_d - dm4f.y * sumf_m;
++}
++
+ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+ 
+@@ -1066,18 +1127,17 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
+     return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
+ }
+ 
+-static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4) {
+-    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
+-    const int8_t * q0_8   = (const int8_t *) &q0_32;
+-    const char4    val0_8 = make_char4(
+-        kvalues_iq4nl[q0_8[0]], kvalues_iq4nl[q0_8[1]], kvalues_iq4nl[q0_8[2]], kvalues_iq4nl[q0_8[3]]);
+-
+-    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
+-    const int8_t * q1_8   = (const int8_t *) &q1_32;
+-    const char4    val1_8 = make_char4(
+-        kvalues_iq4nl[q1_8[0]], kvalues_iq4nl[q1_8[1]], kvalues_iq4nl[q1_8[2]], kvalues_iq4nl[q1_8[3]]);
+-
+-    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
++static __device__ __forceinline__ int2 get_int_from_table_16(uint32_t q4) {
++    uint32_t v1, v2, v3, v4, mask;
++    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
++    mask = (0x32103210 | ((q4 & 0x88888888) >> 1));
++    v1 = __byte_perm(values[0], values[1], q4);
++    v2 = __byte_perm(values[2], values[3], q4);
++    v3 = __byte_perm(v1, v2, mask);
++    v1 = __byte_perm(values[0], values[1], q4 >> 16);
++    v2 = __byte_perm(values[2], values[3], q4 >> 16);
++    v4 = __byte_perm(v1, v2, mask >> 16);
++    return make_int2(__byte_perm(v3, v4, 0x6420), __byte_perm(v3, v4, 0x7531));
+ }
+ 
+ #define VDR_IQ4_NL_Q8_1_MMVQ 2
