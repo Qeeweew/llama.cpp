@@ -812,18 +812,26 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    // aggregate experts
-    ggml_tensor * moe_out = nullptr;
-    for (int i = 0; i < n_expert_used; ++i) {
-        ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
-                experts->nb[2], i*experts->nb[1]);
-
-        if (i == 0) {
-            moe_out = cur_expert;
-        } else {
-            moe_out = ggml_add(ctx0, moe_out, cur_expert);
-        }
+    ggml_tensor * moe_out = experts;
+    for (int i = n_expert_used; i > 1; i = (i + 1) / 2) {
+        moe_out = ggml_view_3d(ctx0, moe_out, n_embd, i / 2, n_tokens, moe_out->nb[1], moe_out->nb[2], 0);
+        ggml_tensor * cur_experts = ggml_view_3d(ctx0, experts, n_embd, i / 2, n_tokens, experts->nb[1], experts->nb[2], ((i + 1) / 2) * experts->nb[1]);
+        moe_out = i == 2 ? ggml_add(ctx0, moe_out, cur_experts) : ggml_add_inplace(ctx0, moe_out, cur_experts);
     }
+    moe_out = ggml_view_2d(ctx0, moe_out, n_embd, n_tokens, moe_out->nb[2], 0);
+
+    // aggregate experts
+    // ggml_tensor * moe_out = nullptr;
+    // for (int i = 0; i < n_expert_used; ++i) {
+    //     ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
+    //             experts->nb[2], i*experts->nb[1]);
+
+    //     if (i == 0) {
+    //         moe_out = cur_expert;
+    //     } else {
+    //         moe_out = ggml_add(ctx0, moe_out, cur_expert);
+    //     }
+    // }
 
     if (n_expert_used == 1) {
         // avoid returning a non-contiguous tensor
