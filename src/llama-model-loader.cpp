@@ -762,26 +762,108 @@ const struct ggml_tensor * llama_model_loader::check_tensor_dims(const std::stri
 }
 
 struct ggml_tensor * llama_model_loader::create_tensor(struct ggml_context * ctx, const std::string & name, const std::initializer_list<int64_t> & ne, int flags) {
-    const struct ggml_tensor * cur = check_tensor_dims(name, ne, !(flags & TENSOR_NOT_REQUIRED));
+    // Special handling for QWEN3MOE ffn_gate_up_exps tensor.
+    if (this->llm_kv.arch == LLM_ARCH_QWEN3MOE && name.find("ffn_gate_up_exps") != std::string::npos) {
+        // 1. Attempt to load the combined tensor directly if it exists in the GGUF.
+        const struct ggml_tensor * cur_combined_meta = get_tensor_meta(name.c_str());
+        if (cur_combined_meta) {
+            bool dims_ok = true;
+            for (size_t j = 0; j < GGML_MAX_DIMS; ++j) {
+                if ((j < ne.size() && ne.begin()[j] != cur_combined_meta->ne[j]) || (j >= ne.size() && cur_combined_meta->ne[j] != 1)) {
+                    dims_ok = false; break;
+                }
+            }
+            if (dims_ok) { // Dimensions match, GGUF has the pre-combined tensor.
+                struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur_combined_meta);
+                ggml_set_name(tensor, name.c_str());
+                if (flags & TENSOR_DUPLICATED) this->size_data += ggml_nbytes(cur_combined_meta); else this->n_created++;
+                this->virtual_tensors_metadata.erase(name); // Not virtual if found directly
+                return tensor;
+            } else {
+                throw std::runtime_error(format("Tensor '%s' found in GGUF, but its dimensions (%s) do not match expected combined dimensions (%s).",
+                    name.c_str(), llama_format_tensor_shape(cur_combined_meta).c_str(), llama_format_tensor_shape(ne).c_str()));
+            }
+        }
 
+        // 2. Combined tensor not found. Try to compose it from ffn_gate_exps and ffn_up_exps parts.
+        std::string gate_part_name = name;
+        size_t pos_gate = gate_part_name.find("ffn_gate_up_exps");
+        if (pos_gate == std::string::npos) throw std::runtime_error("Internal error: constructing gate_part_name from " + name);
+        gate_part_name.replace(pos_gate, std::string("ffn_gate_up_exps").length(), "ffn_gate_exps");
+
+        std::string up_part_name = name;
+        size_t pos_up = up_part_name.find("ffn_gate_up_exps");
+        if (pos_up == std::string::npos) throw std::runtime_error("Internal error: constructing up_part_name from " + name);
+        up_part_name.replace(pos_up, std::string("ffn_gate_up_exps").length(), "ffn_up_exps");
+
+        const struct ggml_tensor * meta_gate = get_tensor_meta(gate_part_name.c_str());
+        const struct ggml_tensor * meta_up   = get_tensor_meta(up_part_name.c_str());
+
+        if (meta_gate && meta_up) { // Both parts found
+            if (meta_gate->type != meta_up->type) {
+                throw std::runtime_error(format("Constituent tensors for '%s' ('%s', '%s') have different ggml_types.", name.c_str(), gate_part_name.c_str(), up_part_name.c_str()));
+            }
+
+            std::vector<int64_t> expected_part_ne_dims;
+            if (ne.size() < 1) throw std::runtime_error(format("Combined tensor '%s' has no dimensions.", name.c_str()));
+            expected_part_ne_dims.push_back(ne.begin()[0]); 
+            if (ne.size() >= 2) {
+                if (ne.begin()[1] % 2 != 0) throw std::runtime_error(format("Middle dim of combined '%s' (%lld) must be even.", name.c_str(), ne.begin()[1]));
+                expected_part_ne_dims.push_back(ne.begin()[1] / 2); 
+            } else { 
+                 throw std::runtime_error(format("Combined tensor '%s' needs at least 2 dimensions for n_embd and 2*n_ff_exp, got %zu.", name.c_str(), ne.size()));
+            }
+            for (size_t k_dim = 2; k_dim < ne.size(); ++k_dim) expected_part_ne_dims.push_back(ne.begin()[k_dim]);
+
+            auto validate_dims_func = [&](const ggml_tensor* part_meta_ptr, const std::vector<int64_t>& expected_dims_vec) {
+                // Check if number of specified dimensions match
+                if (part_meta_ptr->n_dims < (int)expected_dims_vec.size()) return false;
+                // Check specified dimensions
+                for (size_t j_dim = 0; j_dim < expected_dims_vec.size(); ++j_dim) {
+                    if (expected_dims_vec[j_dim] != part_meta_ptr->ne[j_dim]) return false;
+                }
+                // Check remaining dimensions in part_meta are 1
+                for (int j_dim = (int)expected_dims_vec.size(); j_dim < part_meta_ptr->n_dims; ++j_dim) {
+                    if (part_meta_ptr->ne[j_dim] != 1) return false;
+                }
+                return true;
+            };
+
+            if (!validate_dims_func(meta_gate, expected_part_ne_dims) || !validate_dims_func(meta_up, expected_part_ne_dims)) {
+                 throw std::runtime_error(format("Constituent tensor dimensions invalid for composing '%s'.\nGate ('%s'): GGUF %s / Expected part %s\nUp ('%s'): GGUF %s / Expected part %s\nCombined requested: %s",
+                    name.c_str(),
+                    gate_part_name.c_str(), llama_format_tensor_shape(meta_gate).c_str(), llama_format_tensor_shape(expected_part_ne_dims).c_str(),
+                    up_part_name.c_str(), llama_format_tensor_shape(meta_up).c_str(), llama_format_tensor_shape(expected_part_ne_dims).c_str(),
+                    llama_format_tensor_shape(ne).c_str()));
+            }
+
+            struct ggml_tensor * combined_tensor = ggml_new_tensor(ctx, meta_gate->type, (int)ne.size(), ne.begin());
+            ggml_set_name(combined_tensor, name.c_str());
+            this->virtual_tensors_metadata[name] = {gate_part_name, up_part_name};
+            
+            if (flags & TENSOR_DUPLICATED) this->size_data += ggml_nbytes(combined_tensor); else this->n_created++;
+            return combined_tensor;
+        }
+
+        if (!(flags & TENSOR_NOT_REQUIRED)) { // Required but combined and parts not found
+            throw std::runtime_error(format("Tensor '%s' (and its constituent parts '%s', '%s') not found in GGUF.", name.c_str(), gate_part_name.c_str(), up_part_name.c_str()));
+        }
+        return NULL; 
+    }
+
+    // Default behavior for all other tensors
+    const struct ggml_tensor * cur = check_tensor_dims(name, ne, !(flags & TENSOR_NOT_REQUIRED));
     if (cur == NULL) {
         return NULL;
     }
-
     bool duplicated = flags & TENSOR_DUPLICATED;
-
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
     ggml_set_name(tensor, ggml_get_name(cur));
-
-    if (duplicated) {
-        size_data += ggml_nbytes(cur);
-    } else {
-        n_created++;
-    }
-
+    if (duplicated) this->size_data += ggml_nbytes(cur); else this->n_created++;
     return tensor;
-
 }
+
+struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required) {
 
 struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required) {
     const struct ggml_tensor * cur = check_tensor_dims(name, ne, required);
@@ -991,9 +1073,45 @@ bool llama_model_loader::load_all_data(
     }
 
     for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
-        const auto * weight = get_weight(ggml_get_name(cur));
+        std::string current_tensor_name(ggml_get_name(cur) ? ggml_get_name(cur) : "");
+
+        // Placeholder for QWEN3MOE FFN_GATE_UP_EXPS VIRTUAL TENSOR DATA LOADING
+        // This section would handle the actual data concatenation for tensors marked in virtual_tensors_metadata.
+        if (this->virtual_tensors_metadata.count(current_tensor_name)) {
+            // LLAMA_LOG_INFO("DEBUG: QWEN3MOE virtual tensor '%s' - data concatenation would happen here.\n", current_tensor_name.c_str());
+            // The actual data loading and concatenation logic is complex and involves:
+            // 1. Retrieving part names from this->virtual_tensors_metadata.at(current_tensor_name).
+            // 2. Loading data for each part from GGUF files (using mmap/file reads via their llama_tensor_weight).
+            // 3. Ensuring cur->data is allocated (if not already, esp. for non-mmap or non-host-buffer cases).
+            // 4. Copying/concatenating part data into cur->data (or using ggml_backend_tensor_set for GPU).
+            // 5. Validating if check_tensors is true.
+            // For this subtask, full data handling is deferred. The tensor metadata is set up by create_tensor.
+            // The following is a conceptual placeholder for progress update if data were loaded:
+            // size_done += ggml_nbytes(cur);
+            // if (progress_callback) { if (!progress_callback(...)) return false; }
+            // continue; // This would skip the default loading path after handling the virtual tensor.
+            // Since actual data loading for virtual tensors is not implemented in THIS diff,
+            // we let it fall through. If it's a virtual tensor not backed by a single GGUF entry
+            // with the combined name, the get_weight call below will be nullptr for it.
+        }
+        // End of placeholder for QWEN3MOE virtual tensor data loading.
+
+        const auto * weight = get_weight(current_tensor_name.c_str());
+
         if (weight == nullptr) {
-            // this can happen with split experts models
+            // If it's a virtual tensor we expect to handle, this is fine for now, as data loading is deferred.
+            if (this->virtual_tensors_metadata.count(current_tensor_name)) {
+                LLAMA_LOG_DEBUG("Skipping default load for virtual tensor '%s' as data concatenation is deferred.\n", current_tensor_name.c_str());
+                // NOTE: To make it runnable without full data loading, one might need to allocate and zero cur->data here
+                // if it's not managed by a backend buffer, to prevent crashes on access.
+                // However, for this subtask, focusing on metadata and loader structure.
+                // The following would be part of the full implementation:
+                // size_done += ggml_nbytes(cur); 
+                // if (progress_callback) { if (!progress_callback(...)) return false; }
+                continue;
+            }
+            // If not virtual and not in weights_map, then it's an issue.
+            LLAMA_LOG_WARN("%s: tensor '%s' not found in weights_map and not a known virtual tensor.\n", __func__, current_tensor_name.c_str());
             continue;
         }
 

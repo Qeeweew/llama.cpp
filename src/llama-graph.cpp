@@ -690,8 +690,9 @@ ggml_tensor * llm_graph_context::build_ffn(
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
          ggml_tensor * gate_inp,
-         ggml_tensor * up_exps,
-         ggml_tensor * gate_exps,
+         ggml_tensor * gate_up_exps, // Changed: combined gate_up_exps
+         // ggml_tensor * up_exps,    // Removed
+         // ggml_tensor * gate_exps,  // Removed
          ggml_tensor * down_exps,
          ggml_tensor * exp_probs_b,
              int64_t   n_expert,
@@ -773,43 +774,51 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    ggml_tensor * up = build_lora_mm_id(up_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
-    cb(up, "ffn_moe_up", il);
+    // Process combined gate_up_exps
+    ggml_tensor * result_inter = build_lora_mm_id(gate_up_exps, cur, selected_experts); // [2*n_ff_exp, n_expert_used, n_tokens]
+    cb(result_inter, "ffn_moe_gate_up_inter", il);
 
-    ggml_tensor * experts = nullptr;
-    if (gate_exps) {
-        cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
-        cb(cur, "ffn_moe_gate", il);
-    } else {
-        cur = up;
-    }
+    const int64_t n_ff_exp_dim = result_inter->ne[0] / 2; // Assuming ne[0] is 2 * n_ff_exp (hidden_dim_per_expert)
 
+    ggml_tensor * gate_path = ggml_view_3d(ctx0, result_inter,
+                                           n_ff_exp_dim, result_inter->ne[1], result_inter->ne[2],
+                                           result_inter->nb[1], result_inter->nb[2],
+                                           0);
+    cb(gate_path, "ffn_moe_gate_path_view", il);
+
+    ggml_tensor * up_path = ggml_view_3d(ctx0, result_inter,
+                                         n_ff_exp_dim, result_inter->ne[1], result_inter->ne[2],
+                                         result_inter->nb[1], result_inter->nb[2],
+                                         n_ff_exp_dim * ggml_element_size(result_inter));
+    cb(up_path, "ffn_moe_up_path_view", il);
+
+    // Apply activation to gate_path
     switch (type_op) {
-        case LLM_FFN_SILU:
+        case LLM_FFN_SILU: // Fallthrough, SWIGLU uses SiLU on gate part
+        case LLM_FFN_SWIGLU:
             {
-                cur = ggml_silu(ctx0, cur);
-                cb(cur, "ffn_moe_silu", il);
+                gate_path = ggml_silu(ctx0, gate_path);
+                cb(gate_path, "ffn_moe_gate_silu", il);
             } break;
         case LLM_FFN_GELU:
             {
-                cur = ggml_gelu(ctx0, cur);
-                cb(cur, "ffn_moe_gelu", il);
+                gate_path = ggml_gelu(ctx0, gate_path);
+                cb(gate_path, "ffn_moe_gate_gelu", il);
             } break;
         default:
-            GGML_ABORT("fatal error");
+            GGML_ABORT("Unsupported FFN operation type in MoE");
     }
+    
+    // Multiply activated gate_path with up_path
+    ggml_tensor* ffn_activated = ggml_mul(ctx0, gate_path, up_path); // [n_ff_exp, n_expert_used, n_tokens]
+    cb(ffn_activated, "ffn_moe_activated_mul", il);
 
-    if (gate_exps) {
-        cur = ggml_mul(ctx0, cur, up); // [n_ff, n_expert_used, n_tokens]
-        cb(cur, "ffn_moe_gate_par", il);
-    }
-
-    experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
+    ggml_tensor* experts = build_lora_mm_id(down_exps, ffn_activated, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (!weight_before_ffn) {
         experts = ggml_mul(ctx0, experts, weights);
-        cb(cur, "ffn_moe_weighted", il);
+        cb(experts, "ffn_moe_weighted_after_down", il); // Changed cb name for clarity
     }
 
     ggml_tensor * moe_out = experts;
