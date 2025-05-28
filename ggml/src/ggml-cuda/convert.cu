@@ -213,10 +213,6 @@ static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t
     const float d1 = dall * sc; const float m1 = dmin * m;
     get_scale_min_k4(is + 1, x[i].scales, sc, m);
     const float d2 = dall * sc; const float m2 = dmin * m;
-    for (int l = 0; l < n; ++l) {
-        y[l + 0] = d1 * (q[l] & 0xF) - m1;
-        y[l +32] = d2 * (q[l] >>  4) - m2;
-    }
     // Vectorized computation using float4 or float2
     if constexpr (std::is_same<dst_t, float>::value) {
         // Use float4 for single-precision output
@@ -495,11 +491,40 @@ static __global__ void dequantize_block_iq4_xs(const void * __restrict__ vx, dst
     const int64_t il = tid/8; // 0...3
     const int64_t ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 4*il;
-    const uint8_t  * q4 = x[i].qs + 16*ib + 4*il;
+    const uint32_t q4 = *((uint32_t *) (x[i].qs + 16*ib + 4*il));
     const float d = (float)x[i].d * ((((x[i].scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((x[i].scales_h >> 2*ib) & 3) << 4)) - 32);
-    for (int j = 0; j < 4; ++j) {
-        y[j+ 0] = d * kvalues_iq4nl[q4[j] & 0xf];
-        y[j+16] = d * kvalues_iq4nl[q4[j] >>  4];
+
+    float4 y0, y1;
+    int v1, v2, v3, v4;
+    uint32_t mask;
+
+    const uint32_t * values = (const uint32_t *)kvalues_iq4nl;
+    mask = (0x32103210 | ((q4 & 0x88888888) >> 1));
+    v1 = __byte_perm(values[0], values[1], q4);
+    v2 = __byte_perm(values[2], values[3], q4);
+    v3 = __byte_perm(v1, v2, mask);
+    v1 = __byte_perm(values[0], values[1], q4 >> 16);
+    v2 = __byte_perm(values[2], values[3], q4 >> 16);
+    v4 = __byte_perm(v1, v2, mask >> 16);
+    int8_t* q8_l = (int8_t *) &v3;
+    int8_t* q8_h = (int8_t *) &v4;
+
+    y0.x = d * q8_l[0]; y1.x = d * q8_l[1];
+    y0.y = d * q8_l[2]; y1.y = d * q8_l[3];
+    y0.z = d * q8_h[0]; y1.z = d * q8_h[1];
+    y0.w = d * q8_h[2]; y1.w = d * q8_h[3];
+
+    if constexpr(std::is_same<dst_t, float>::value) {
+        *((float4*) (y +  0)) = y0;
+        *((float4*) (y + 16)) = y1;
+    } else {
+        float2 y2, y3;
+        *((half2*) &y2.x) = __float22half2_rn(make_float2(y0.x, y0.y));
+        *((half2*) &y2.y) = __float22half2_rn(make_float2(y0.z, y0.w));
+        *((half2*) &y3.x) = __float22half2_rn(make_float2(y1.x, y1.y));
+        *((half2*) &y3.y) = __float22half2_rn(make_float2(y1.z, y1.w));
+        *((float2*) (y +  0)) = y2;
+        *((float2*) (y + 16)) = y3;
     }
 }
 
