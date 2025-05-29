@@ -2542,9 +2542,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         // MoE branch
                         const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
 
-                        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, 2 * n_ff_exp, n_expert}, 0);
                         layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
-                        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                        // layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
                     }
                 } break;
             case LLM_ARCH_PHI2:
@@ -7198,7 +7198,7 @@ struct llm_build_qwen3moe : public llm_graph_context {
             ggml_tensor * moe_out =
                 build_moe_ffn(cur,
                         model.layers[il].ffn_gate_inp,
-                        model.layers[il].ffn_up_exps,
+                        nullptr,
                         model.layers[il].ffn_gate_exps,
                         model.layers[il].ffn_down_exps,
                         nullptr,

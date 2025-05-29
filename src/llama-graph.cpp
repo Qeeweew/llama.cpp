@@ -773,15 +773,40 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    ggml_tensor * up = build_lora_mm_id(up_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
-    cb(up, "ffn_moe_up", il);
-
     ggml_tensor * experts = nullptr;
-    if (gate_exps) {
-        cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
-        cb(cur, "ffn_moe_gate", il);
+    ggml_tensor * up;
+    if (up_exps) {
+        // original case: separate up and gate weights
+        up = build_lora_mm_id(up_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
+        cb(up, "ffn_moe_up", il);
+
+        if (gate_exps) {
+            cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
+            cb(cur, "ffn_moe_gate", il);
+        } else {
+            cur = up;
+        }
     } else {
-        cur = up;
+        // merged case: up and gate weights are concatenated in gate_exps
+        GGML_ASSERT(gate_exps != nullptr);
+        
+        // merged weights shape: [n_embd, 2 * n_ff, n_expert]
+        const int64_t n_ff = gate_exps->ne[1] / 2;
+        
+        // split merged weights into up and gate parts
+        ggml_tensor * merged = build_lora_mm_id(gate_exps, cur, selected_experts); // [2 * n_ff, n_expert_used, n_tokens]
+        cb(merged, "ffn_moe_merged_up_gate", il);
+
+        // extract up part (first half)
+        up = ggml_view_3d(ctx0, merged, 
+                          n_ff, n_expert_used, n_tokens,
+                          merged->nb[1], merged->nb[2],
+                          0);
+        // extract gate part (second half) 
+        cur = ggml_view_3d(ctx0, merged,
+                           n_ff, n_expert_used, n_tokens,
+                           merged->nb[1], merged->nb[2],
+                           n_ff * merged->nb[1]);
     }
 
     switch (type_op) {
