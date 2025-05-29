@@ -798,15 +798,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(merged, "ffn_moe_merged_up_gate", il);
 
         // extract up part (first half)
-        up = ggml_view_3d(ctx0, merged, 
+        cur = ggml_view_3d(ctx0, merged, 
                           n_ff, n_expert_used, n_tokens,
                           merged->nb[1], merged->nb[2],
                           0);
         // extract gate part (second half) 
-        cur = ggml_view_3d(ctx0, merged,
+        up = ggml_view_3d(ctx0, merged,
                            n_ff, n_expert_used, n_tokens,
                            merged->nb[1], merged->nb[2],
-                           n_ff * merged->nb[1]);
+                           n_ff * merged->nb[0]);
     }
 
     switch (type_op) {
