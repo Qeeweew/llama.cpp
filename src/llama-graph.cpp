@@ -792,17 +792,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         
         // merged weights shape: [n_embd, 2 * n_ff, n_expert]
         const int64_t n_ff = gate_exps->ne[1] / 2;
-        
+
         // split merged weights into up and gate parts
         ggml_tensor * merged = build_lora_mm_id(gate_exps, cur, selected_experts); // [2 * n_ff, n_expert_used, n_tokens]
         cb(merged, "ffn_moe_merged_up_gate", il);
 
         // extract up part (first half)
-        cur = ggml_view_3d(ctx0, merged, 
+        cur = ggml_view_3d(ctx0, merged,
                           n_ff, n_expert_used, n_tokens,
                           merged->nb[1], merged->nb[2],
                           0);
-        // extract gate part (second half) 
+        // extract gate part (second half)
         up = ggml_view_3d(ctx0, merged,
                            n_ff, n_expert_used, n_tokens,
                            merged->nb[1], merged->nb[2],

@@ -2864,7 +2864,6 @@ class Qwen2MoeModel(TextModel):
     _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # process the experts separately
         if name.find("experts") != -1:
             n_experts = self.hparams["num_experts"]
             assert bid is not None
@@ -2877,22 +2876,37 @@ class Qwen2MoeModel(TextModel):
             if len(self._experts[bid]) >= n_experts * 3:
                 tensors: list[tuple[str, Tensor]] = []
 
-                # merge the experts into a single 3d tensor
-                for w_name in ["down_proj", "gate_proj", "up_proj"]:
-                    datas: list[Tensor] = []
+                # Process down_proj normally
+                down_datas = []
+                for xid in range(n_experts):
+                    ename = f"model.layers.{bid}.mlp.experts.{xid}.down_proj.weight"
+                    down_datas.append(self._experts[bid][ename])
+                    del self._experts[bid][ename]
+                down_data_torch = torch.stack(down_datas, dim=0)
+                merged_down_name = f"model.layers.{bid}.mlp.experts.down_proj.weight"
+                tensors.append((self.map_tensor_name(merged_down_name), down_data_torch))
 
-                    for xid in range(n_experts):
-                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
-                        datas.append(self._experts[bid][ename])
-                        del self._experts[bid][ename]
+                # Process gate_proj and up_proj by concatenating along dim=1
+                gate_up_datas = []
+                for xid in range(n_experts):
+                    gate_name = f"model.layers.{bid}.mlp.experts.{xid}.gate_proj.weight"
+                    up_name = f"model.layers.{bid}.mlp.experts.{xid}.up_proj.weight"
+                    
+                    gate_tensor = self._experts[bid][gate_name]
+                    up_tensor = self._experts[bid][up_name]
+                    
+                    # Concatenate gate and up tensors along the second dimension (dim=1)
+                    combined = torch.cat((gate_tensor, up_tensor), dim=0)
+                    gate_up_datas.append(combined)
+                    
+                    del self._experts[bid][gate_name]
+                    del self._experts[bid][up_name]
 
-                    data_torch = torch.stack(datas, dim=0)
-
-                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-
-                    new_name = self.map_tensor_name(merged_name)
-
-                    tensors.append((new_name, data_torch))
+                gate_up_data_torch = torch.stack(gate_up_datas, dim=0)
+                print(gate_up_data_torch.shape)
+                merged_gate_up_name = f"model.layers.{bid}.mlp.experts.gate_proj.weight"
+                tensors.append((self.map_tensor_name(merged_gate_up_name), gate_up_data_torch))
+                
                 return tensors
             else:
                 return []
