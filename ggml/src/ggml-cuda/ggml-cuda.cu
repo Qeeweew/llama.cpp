@@ -45,7 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
+// #include <charconv>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
@@ -2172,6 +2172,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_DIV:
             ggml_cuda_op_div(ctx, dst);
             break;
+        case GGML_OP_SWIGLU:
+            ggml_cuda_op_swiglu(ctx, dst);
+            break;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(dst)) {
                 case GGML_UNARY_OP_ABS:
@@ -3173,6 +3176,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SUB:
         case GGML_OP_MUL:
         case GGML_OP_DIV:
+        case GGML_OP_SWIGLU:
         case GGML_OP_SCALE:
         case GGML_OP_SQR:
         case GGML_OP_SQRT:

@@ -786,6 +786,27 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         } else {
             cur = up;
         }
+
+        switch (type_op) {
+            case LLM_FFN_SILU:
+                {
+                    cur = ggml_silu(ctx0, cur);
+                    cb(cur, "ffn_moe_silu", il);
+                } break;
+            case LLM_FFN_GELU:
+                {
+                    cur = ggml_gelu(ctx0, cur);
+                    cb(cur, "ffn_moe_gelu", il);
+                } break;
+            default:
+                GGML_ABORT("fatal error");
+        }
+
+        if (gate_exps) {
+            cur = ggml_mul(ctx0, cur, up); // [n_ff, n_expert_used, n_tokens]
+            cb(cur, "ffn_moe_gate_par", il);
+        }
+
     } else {
         // merged case: up and gate weights are concatenated in gate_exps
         GGML_ASSERT(gate_exps != nullptr);
@@ -802,33 +823,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                           n_ff, n_expert_used, n_tokens,
                           merged->nb[1], merged->nb[2],
                           0);
-        cur = ggml_cont(ctx0, cur); // ensure contiguous tensor
-
         // extract gate part (second half)
         up = ggml_view_3d(ctx0, merged,
                            n_ff, n_expert_used, n_tokens,
                            merged->nb[1], merged->nb[2],
                            merged->nb[1] / 2);
-    }
-
-    switch (type_op) {
-        case LLM_FFN_SILU:
-            {
-                cur = ggml_silu(ctx0, cur);
-                cb(cur, "ffn_moe_silu", il);
-            } break;
-        case LLM_FFN_GELU:
-            {
-                cur = ggml_gelu(ctx0, cur);
-                cb(cur, "ffn_moe_gelu", il);
-            } break;
-        default:
-            GGML_ABORT("fatal error");
-    }
-
-    if (gate_exps) {
-        cur = ggml_mul(ctx0, cur, up); // [n_ff, n_expert_used, n_tokens]
-        cb(cur, "ffn_moe_gate_par", il);
+        
+        cur = ggml_swiglu(ctx0, up, cur);
     }
 
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
