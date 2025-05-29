@@ -167,7 +167,7 @@ static __global__ void mul_mat_vec_q(
     const int sample_y    = sample_dst;
 
     // partial sum for each thread
-    float tmp[ncols_dst] = {{0.0f}};
+    float tmp[ncols_dst] = {0.0f};
 
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row*stride_row_x;
