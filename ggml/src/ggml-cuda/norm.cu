@@ -106,7 +106,7 @@ static __global__ void group_norm_f32(const float * x, float * dst, const int gr
 
 template <int block_size>
 static __global__ void rms_norm_f32(
-        const float * x, float * dst, const int ncols, const int64_t stride_row, const int64_t stride_channel,
+        const float * x, float * dst, const float * weight, const int ncols, const int64_t stride_row, const int64_t stride_channel,
         const int64_t stride_sample, const float eps) {
     const int nrows     = gridDim.x;
     const int nchannels = gridDim.y;
@@ -146,6 +146,9 @@ static __global__ void rms_norm_f32(
 
     for (int col = tid; col < ncols; col += block_size) {
         dst[col] = scale * x[col];
+        if (weight) {
+            dst[col] *= weight[col];
+        }
     }
 }
 
@@ -305,15 +308,15 @@ static void group_norm_f32_cuda(
 }
 
 static void rms_norm_f32_cuda(
-        const float * x, float * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
+        const float * x, float * dst, const float* weight, const int ncols, const int nrows, const int nchannels, const int nsamples,
         const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps, cudaStream_t stream) {
     const dim3 blocks_num(nrows, nchannels, nsamples);
     if (ncols < 1024) {
         const dim3 block_dims(WARP_SIZE, 1, 1);
-        rms_norm_f32<WARP_SIZE><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+        rms_norm_f32<WARP_SIZE><<<blocks_num, block_dims, 0, stream>>>(x, dst, weight, ncols, stride_row, stride_channel, stride_sample, eps);
     } else {
         const dim3 block_dims(1024, 1, 1);
-        rms_norm_f32<1024><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+        rms_norm_f32<1024><<<blocks_num, block_dims, 0, stream>>>(x, dst, weight, ncols, stride_row, stride_channel, stride_sample, eps);
     }
 }
 
@@ -385,7 +388,9 @@ void ggml_cuda_op_group_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 
 void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
     const float * src0_d = (const float *) src0->data;
+    const float * weight = src1 ? (const float *) src1->data : nullptr;
     float * dst_d = (float *) dst->data;
     cudaStream_t stream = ctx.stream();
 
@@ -404,7 +409,7 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s02 = nb02 / ts0;
     const int64_t s03 = nb03 / ts0;
 
-    rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+    rms_norm_f32_cuda(src0_d, dst_d, weight, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
 }
 
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

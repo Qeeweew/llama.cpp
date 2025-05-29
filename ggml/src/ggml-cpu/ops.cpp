@@ -3169,6 +3169,8 @@ static void ggml_compute_forward_rms_norm_f32(
         ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const float * weight = src1 ? (const float*) src1->data : nullptr;
 
     GGML_ASSERT(ggml_are_same_shape(src0, dst));
 
@@ -3199,10 +3201,12 @@ static void ggml_compute_forward_rms_norm_f32(
 
                 float * y = (float *) ((char *) dst->data + i01*nb1 + i02*nb2 + i03*nb3);
 
-                memcpy(y, x, ne00 * sizeof(float));
-                // for (int i00 = 0; i00 < ne00; i00++) {
-                //     y[i00] = x[i00];
-                // }
+                if (weight) {
+                    // apply weight
+                    ggml_vec_mul_f32(ne00, y, x, weight);
+                } else {
+                    memcpy(y, x, ne00 * sizeof(float));
+                }
 
                 const float scale = 1.0f/sqrtf(mean + eps);
 

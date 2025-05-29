@@ -532,7 +532,7 @@ ggml_tensor * llm_graph_context::build_norm(
                  int   il) const {
     switch (type) {
         case LLM_NORM:       cur = ggml_norm    (ctx0, cur, hparams.f_norm_eps);     break;
-        case LLM_NORM_RMS:   cur = ggml_rms_norm(ctx0, cur, hparams.f_norm_rms_eps); break;
+        case LLM_NORM_RMS:   cur = ggml_rms_norm_ext(ctx0, cur, mw, hparams.f_norm_rms_eps); break;
         case LLM_NORM_GROUP:
             {
                 cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], 1, cur->ne[1]);
@@ -545,7 +545,7 @@ ggml_tensor * llm_graph_context::build_norm(
         cb(cur, "norm", il);
     }
 
-    if (mw) {
+    if (type != LLM_NORM_RMS && mw) {
         cur = ggml_mul(ctx0, cur, mw);
         if (mb) {
             cb(cur, "norm_w", il);

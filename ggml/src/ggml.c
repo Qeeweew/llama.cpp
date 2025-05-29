@@ -2626,6 +2626,7 @@ struct ggml_tensor * ggml_norm_inplace(
 static struct ggml_tensor * ggml_rms_norm_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
+        struct ggml_tensor  * weight,
         float                 eps,
         bool                  inplace) {
     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
@@ -2634,6 +2635,7 @@ static struct ggml_tensor * ggml_rms_norm_impl(
 
     result->op     = GGML_OP_RMS_NORM;
     result->src[0] = a;
+    result->src[1] = weight;
 
     return result;
 }
@@ -2642,14 +2644,22 @@ struct ggml_tensor * ggml_rms_norm(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         float                 eps) {
-    return ggml_rms_norm_impl(ctx, a, eps, false);
+    return ggml_rms_norm_impl(ctx, a, NULL, eps, false);
 }
 
 struct ggml_tensor * ggml_rms_norm_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         float                 eps) {
-    return ggml_rms_norm_impl(ctx, a, eps, true);
+    return ggml_rms_norm_impl(ctx, a, NULL, eps, true);
+}
+
+struct ggml_tensor * ggml_rms_norm_ext(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * weight,
+        float                 eps) {
+    return ggml_rms_norm_impl(ctx, a, weight, eps, false);
 }
 
 // ggml_rms_norm_back
