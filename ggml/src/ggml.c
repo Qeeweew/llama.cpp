@@ -901,6 +901,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SUB",
     "MUL",
     "DIV",
+    "SWIGLU",
     "SQR",
     "SQRT",
     "LOG",
@@ -984,7 +985,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
 };
 
-static_assert(GGML_OP_COUNT == 82, "GGML_OP_COUNT != 82");
+static_assert(GGML_OP_COUNT == 83, "GGML_OP_COUNT != 82");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1079,7 +1080,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
 };
 
-static_assert(GGML_OP_COUNT == 82, "GGML_OP_COUNT != 82");
+static_assert(GGML_OP_COUNT == 83, "GGML_OP_COUNT != 82");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -2085,6 +2086,21 @@ struct ggml_tensor * ggml_div_inplace(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b) {
     return ggml_div_impl(ctx, a, b, true);
+}
+
+struct ggml_tensor * ggml_swiglu(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    GGML_ASSERT(ggml_can_repeat(b, a));
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    result->op     = GGML_OP_SWIGLU;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
 }
 
 // ggml_sqr

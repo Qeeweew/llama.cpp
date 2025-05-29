@@ -436,6 +436,7 @@ extern "C" {
         GGML_OP_SUB,
         GGML_OP_MUL,
         GGML_OP_DIV,
+        GGML_OP_SWIGLU,
         GGML_OP_SQR,
         GGML_OP_SQRT,
         GGML_OP_LOG,
@@ -857,6 +858,11 @@ extern "C" {
             struct ggml_tensor  * b);
 
     GGML_API struct ggml_tensor * ggml_div_inplace(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
+    GGML_API struct ggml_tensor * ggml_swiglu(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);

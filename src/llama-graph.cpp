@@ -802,11 +802,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                           n_ff, n_expert_used, n_tokens,
                           merged->nb[1], merged->nb[2],
                           0);
+        cur = ggml_cont(ctx0, cur); // ensure contiguous tensor
+
         // extract gate part (second half)
         up = ggml_view_3d(ctx0, merged,
                            n_ff, n_expert_used, n_tokens,
                            merged->nb[1], merged->nb[2],
-                           n_ff * merged->nb[0]);
+                           merged->nb[1] / 2);
     }
 
     switch (type_op) {

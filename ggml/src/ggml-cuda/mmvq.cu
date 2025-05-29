@@ -180,7 +180,6 @@ static __global__ void mul_mat_vec_q(
 
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
-#pragma unroll
             tmp[j] += vec_dot_q_cuda(
                 vx, &y[j*stride_col_y + kby], kbx_offset + kbx, kqs);
         }
