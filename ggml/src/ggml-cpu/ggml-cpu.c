@@ -2721,10 +2721,10 @@ struct ggml_cplan ggml_graph_plan(
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
                         if (node->src[1]->type == GGML_TYPE_F32 && ggml_is_quantized(node->src[0]->type)) {
-                            int64_t ne10 = node->src[1]->ne[0];
-                            int64_t ne11 = node->src[1]->ne[1];
-                            const int ALIGN_NE11 = 16;
-                            cur = MAX(cur, (ne10 + ALIGN_NE11 - 1) / ALIGN_NE11 * ALIGN_NE11 * ne11 / 8 * 9);
+                            size_t ne10 = node->src[1]->ne[0];
+                            size_t ne11 = node->src[1]->ne[1];
+                            const size_t ALIGN_NE11 = 16;
+                            cur = MAX(cur, (ne11 + ALIGN_NE11 - 1) / ALIGN_NE11 * ALIGN_NE11 * ne10 * 2);
                         }
                     } break;
                 case GGML_OP_MUL_MAT_ID:
