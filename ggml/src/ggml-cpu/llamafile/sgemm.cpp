@@ -31,6 +31,7 @@ static void gemm_f32_ggml(const struct ggml_compute_params * params, int M, int 
                            float* C, int ldc);
 static inline void quantize_block_q8_0(const float *x, float* y_d, int8_t* y_qs);
 static void pack_A_q8_0_f32(int M, int K, const float* A, int lda, int8_t* A_qs_packed, float* A_d_packed);
+static void pack_A_q8_0_f32(int M, int K, const float** A, int offset, int8_t* A_qs_packed, float* A_d_packed);
 
 // B矩阵打包函数的模板声明
 template<typename B_TYPE>
@@ -133,6 +134,33 @@ void pack_A_q8_0_f32(
             for (int row = 0; row < MR; ++row) {
                 if (i + row < M) {
                     quantize_block_q8_0(A + (i + row) * lda + j * QK8_0, &A_d_packed[j * MR + row], &A_qs_packed_buf[row * QK8_0]);
+                }
+            }
+            for (int k = 0; k < QK8_0; k += 4) {
+                for (int row = 0; row < MR; ++row) {
+                    memcpy(A_qs_packed, &A_qs_packed_buf[row * QK8_0 + k], 4);
+                    A_qs_packed += 4;
+                }
+            }
+        }
+        A_d_packed += MR * K_BLOCKS;
+    }
+}
+
+void pack_A_q8_0_f32(
+    int M, int K,
+    const float** A, int offset,
+    int8_t* A_qs_packed, float* A_d_packed)
+{
+    const int K_BLOCKS = K / QK8_0; // 假设所有类型处理的块大小都与QK8_0兼容
+
+    int8_t A_qs_packed_buf[MR * QK8_0];
+
+    for (int i = 0; i < M; i += MR) {
+        for (int j = 0; j < K_BLOCKS; ++j) {
+            for (int row = 0; row < MR; ++row) {
+                if (i + row < M) {
+                    quantize_block_q8_0(A[i + row] + offset + j * QK8_0, &A_d_packed[j * MR + row], &A_qs_packed_buf[row * QK8_0]);
                 }
             }
             for (int k = 0; k < QK8_0; k += 4) {
@@ -531,10 +559,9 @@ static void gemm_f32_ggml(
     const struct ggml_compute_params * params,
     int M, int N, int K,
     const float* A, int lda,
-    const B_TYPE* B_q, int ldb_q_unused,
+    const B_TYPE* B_q,
     float* C, int ldc)
 {
-    (void)ldb_q_unused;
     assert(K % QK8_0 == 0); // 假设所有支持的类型块大小都一样
 
     const int K_BLOCKS = K / QK8_0;
@@ -549,7 +576,7 @@ static void gemm_f32_ggml(
     size_t a_qs_packed_size = GGML_PAD(M_CEIL * K * sizeof(int8_t), 64);
     size_t a_d_packed_size  = GGML_PAD(M_CEIL * K_BLOCKS * sizeof(float), 64);
     if (params->wsize < a_qs_packed_size + a_d_packed_size) {
-        fprintf(stderr,"ggml_sgemm_q8_0_f32: wsize too small\n");
+        fprintf(stderr,"ggml_sgemm_q8_0_f32: wsize = %zu too small, need %zu\n", params->wsize, a_qs_packed_size + a_d_packed_size);
         return;
     }
 
@@ -623,6 +650,69 @@ static void gemm_f32_ggml(
     ggml_barrier(params->threadpool);
 }
 
+template<typename B_TYPE, int M_MAX>
+static void gemm_f32_ggml_indirect(
+    int M, int N, int K,
+    const float** A,
+    const B_TYPE* B_q,
+    float** C)
+{
+    assert(K % QK8_0 == 0); // 假设所有支持的类型块大小都一样
+
+    const int K_BLOCKS = K / QK8_0;
+
+    constexpr int MC = 32;
+    constexpr int KC = 1024;
+    constexpr int NC = 32;
+
+    const int M_CEIL = (M + MR - 1) / MR * MR;
+
+    int8_t A_qs_packed[M_MAX * KC] __attribute__((aligned(64)));
+    float A_d_packed[M_MAX * KC / QK8_0] __attribute__((aligned(64)));
+
+    int8_t B_qs_packed[KC * NC] __attribute__((aligned(64)));
+    float B_d_packed[(KC / QK8_0) * NC] __attribute__((aligned(64)));
+
+    for (int kc = 0; kc < K; kc += KC) {
+        const int kc_size = std::min(KC, K - kc);
+        const int kc_blocks = kc_size / QK8_0;
+        const int k_block_offset = kc / QK8_0;
+        pack_A_q8_0_f32(M, kc_size, A, kc, A_qs_packed, A_d_packed);
+
+        for (int jc = 0; jc < N; jc += NC) {
+            const int nc = std::min(NC, N - jc);
+            pack_B<B_TYPE>(nc, kc_size, B_q + jc * K_BLOCKS + k_block_offset, K_BLOCKS, B_qs_packed, B_d_packed);
+
+            for (int ic = 0; ic < M; ic += MC) {
+                const int mc = std::min(MC, M - ic);
+                float C_buf[MR * NR] __attribute__((aligned(64)));
+                for (int jr = 0; jr < nc; jr += NR) {
+                    for (int ir = 0; ir < mc; ir += MR) {
+                         gemm_q8_0_microkernel(
+                            kc_size, std::min(MR, mc - ir),
+                            A_qs_packed + (ic + ir) * kc_size,
+                            A_d_packed + (ic + ir) * kc_blocks,
+                            B_qs_packed + jr * kc_size,
+                            B_d_packed + jr * kc_blocks,
+                            C_buf, NR,
+                            false
+                        );
+                        for (int i = 0; i < std::min(MR, mc - ir); ++i) {
+                            for (int j = 0; j < std::min(NR, nc - jr); ++j) {
+                                if (kc == 0) {
+                                    C[ic + ir + i][jc + jr + j] = C_buf[i * NR + j];
+                                } else {
+                                    C[ic + ir + i][jc + jr + j] += C_buf[i * NR + j];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * Performs optimized matrix multiplication on CPU.
  *
@@ -677,18 +767,18 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
         // The first matrix (A) is the quantized one.
         switch (Atype) {
             case GGML_TYPE_Q8_0: {
-                gemm_f32_ggml<block_q8_0>(params, n, m, k * QK8_0,
+                gemm_f32_ggml<block_q8_0>(params, n, m, k,
                                    (const float*)B, ldb,
-                                   (const block_q8_0*)A, lda,
+                                   (const block_q8_0*)A,
                                    (float*)C, ldc);
                 return true;
             }
             case GGML_TYPE_Q4_0: {
                 // Note: The K dimension for the function is the number of float elements.
                 // For Q4_0 and Q8_0, this is the same.
-                gemm_f32_ggml<block_q4_0>(params, n, m, k * QK4_0,
+                gemm_f32_ggml<block_q4_0>(params, n, m, k,
                                    (const float*)B, ldb,
-                                   (const block_q4_0*)A, lda,
+                                   (const block_q4_0*)A,
                                    (float*)C, ldc);
                 return true;
             }
@@ -697,5 +787,87 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
         }
     }
 
+    (void) lda;
+
     return false;
+}
+
+/*
+    c = ggml_mul_mat_id(ctx, as, b, ids);
+
+    as  -> [cols, rows, n_expert]
+    b   -> [cols, n_expert_used, n_tokens]
+    ids -> [n_expert_used, n_tokens] (i32)
+    c   -> [rows, n_expert_used, n_tokens]
+
+    in b, n_expert_used can be broadcasted to match the n_expert_used of ids
+
+    c ~= as[:,:,i] @ b[:,i%r,t], i = ids[e,t] for all e,t in ids
+*/
+
+void llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int rows, int n_expert, int n_expert_used, int n_tokens,
+                        const void *as, const float *b, int64_t ldb, const int32_t*ids, int64_t ld_ids, float* c, int64_t ldc, int Atype, bool broadcastb)
+{
+
+    // printf("llamafile_sgemm_id: cols=%d, rows=%d, n_expert=%d, n_expert_used=%d, n_tokens=%d, Atype=%d\n broadcastb=%d\n",
+    //        cols, rows, n_expert, n_expert_used, n_tokens, Atype, broadcastb);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    if (ith == 0) {
+        ggml_threadpool_chunk_set(params->threadpool, nth);
+    }
+    ggml_barrier(params->threadpool);
+
+    int n_as = ith;
+    constexpr int MAX_BATCH = 64;
+    float* c_ptrs[MAX_BATCH];
+    const float* b_ptrs[MAX_BATCH];
+
+    while (n_as < n_expert) {
+        int token_id = 0;
+        int batch = 0;
+        while (token_id < n_tokens) {
+            for (int i = 0; i < n_expert_used; ++i) {
+                if (ids[token_id * ld_ids + i] == n_as) {
+                    if (broadcastb) {
+                        b_ptrs[batch] = &b[token_id * ldb];
+                    } else {
+                        b_ptrs[batch] = &b[((token_id * n_expert_used) + i) * ldb];
+                    }
+                    c_ptrs[batch] = &c[token_id * (ldc * n_expert_used) + i * ldc];
+                    batch++;
+                    break;
+                }
+            }
+            token_id++;
+            if (batch == MAX_BATCH || (token_id == n_tokens && batch > 0)) {
+                // printf("%d: batch=%d, n_as=%d\n", ith, batch, n_as);
+                switch (Atype) {
+                    case GGML_TYPE_Q8_0:
+                        gemm_f32_ggml_indirect<block_q8_0, MAX_BATCH>(
+                            batch, rows, cols,
+                            (const float**)b_ptrs,
+                            (const block_q8_0*)as + n_as * rows * (cols / QK8_0),
+                            (float**)c_ptrs
+                        );
+                        break;
+                    case GGML_TYPE_Q4_0:
+                        gemm_f32_ggml_indirect<block_q4_0, MAX_BATCH>(
+                            batch, rows, cols,
+                            (const float**)b_ptrs,
+                            (const block_q4_0*)as + n_as * rows * (cols / QK4_0),
+                            (float**)c_ptrs
+                        );
+                        break;
+                    default:
+                        assert(false);
+                }
+                batch = 0;
+            }
+        }
+        n_as = ggml_threadpool_chunk_add(params->threadpool, 1);
+    }
+    ggml_barrier(params->threadpool);
 }

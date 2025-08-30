@@ -1245,7 +1245,7 @@ void ggml_compute_forward_mul_mat(
         for (int64_t i13 = 0; i13 < ne13; i13++)
             for (int64_t i12 = 0; i12 < ne12; i12++)
                 if (!llamafile_sgemm(params,
-                                     ne01, ne11, ne00/ggml_blck_size(src0->type),
+                                     ne01, ne11, ne00,
                                      (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
                                      nb01/ggml_type_size(src0->type),
                                      (const char *)src1->data + i12*nb12 + i13*nb13,
@@ -1304,30 +1304,6 @@ UseGgmlGemm1:;
     }
 
     ggml_barrier(params->threadpool);
-
-#if GGML_USE_LLAMAFILE
-    if (src1->type != vec_dot_type) {
-        const void* wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
-        const size_t row_size = ggml_row_size(vec_dot_type, ne10);
-
-        for (int64_t i13 = 0; i13 < ne13; i13++)
-            for (int64_t i12 = 0; i12 < ne12; i12++)
-                if (!llamafile_sgemm(params,
-                                     ne01, ne11, ne00/ggml_blck_size(src0->type),
-                                     (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
-                                     nb01/ggml_type_size(src0->type),
-                                     (const char *)wdata + (i12*ne11 + i13*ne12*ne11)*row_size,
-                                     row_size/ggml_type_size(vec_dot_type),
-                                     (char *)dst->data + i12*nb2 + i13*nb3,
-                                     nb1/ggml_type_size(dst->type),
-                                     src0->type,
-                                     vec_dot_type,
-                                     dst->type))
-                    goto UseGgmlGemm2;
-        return;
-    }
-UseGgmlGemm2:;
-#endif
 
     // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
     const int64_t nr0 = ne0;
@@ -1506,6 +1482,17 @@ static void ggml_compute_forward_mul_mat_id(
     // row groups
     const int n_ids = ids->ne[0]; // n_expert_used
     const int n_as  = ne02;       // n_expert
+    // printf("ne10 = %lld, ne11 = %lld, ne12 = %lld, ne13 = %lld\n", src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
+    // printf("nb10 = %lld, nb11 = %lld, nb12 = %lld, nb13 = %lld\n", src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3]);
+
+    if ((type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q4_0) && src1->type == GGML_TYPE_F32) {
+        llamafile_sgemm_id(
+            params, src0->ne[0], src0->ne[1], src0->ne[2], dst->ne[1], src1->ne[2],
+            src0->data, (const float*) src1->data, (int64_t) src1->nb[1] / 4, (const int32_t*) ids->data, (int64_t) ids->nb[1] / 4, (float*) dst->data, dst->nb[1] / 4,
+            type, src1->ne[1] == 1
+        );
+        return;
+    }
 
     void * wdata_cur = params->wdata;
 
