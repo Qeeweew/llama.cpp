@@ -1,3 +1,5 @@
+#define GGML_COMMON_IMPL_CPP
+#include "ggml-common.h"
 #include "sgemm.h"
 #include "ggml-impl.h"
 #include "ggml-cpu-impl.h"
@@ -6,6 +8,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 
 #if defined(__ARM_NEON)
@@ -16,12 +19,51 @@
 #include <immintrin.h>
 #define MR 8
 #define NR 8
-static inline __m256i bytes_from_nibbles_32(const uint8_t * rsi)
+static inline __m256i to_int8_q4_0(const uint8_t * rsi)
 {
+    const __m256i off = _mm256_set1_epi8( 8 );
     const __m128i tmp = _mm_loadu_si128((const __m128i *)rsi);
     const __m256i bytes = _mm256_set_m128i(_mm_srli_epi16(tmp, 4), tmp);
     const __m256i lowMask = _mm256_set1_epi8(0xF);
-    return _mm256_and_si256(lowMask, bytes);
+    return _mm256_sub_epi8(_mm256_and_si256(lowMask, bytes), off);
+}
+
+static inline __m256i to_int8_mxfp4(const uint8_t * rsi)
+{
+    const __m128i values128 = _mm_loadu_si128((const __m128i*)kvalues_mxfp4);
+    const __m128i tmp = _mm_loadu_si128((const __m128i *)rsi);
+    const __m128i m4b  = _mm_set1_epi8(0x0f);
+    return _mm256_set_m128i(_mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(tmp, 4), m4b)),
+                                              _mm_shuffle_epi8(values128, _mm_and_si128(tmp, m4b)));
+}
+// Helper function to transpose an 8x8 matrix of 32-bit integers using AVX2
+static inline void transpose_8x8_i32_avx2(__m256i row[8], __m256i col[8]) {
+    __m256i first0 = _mm256_unpacklo_epi32(row[0], row[1]); // a0 b0 a1 b1 a2 b2 a3 b3
+    __m256i first1 = _mm256_unpackhi_epi32(row[0], row[1]); // a4 b4 a5 b5 a6 b6 a7 b7 
+    __m256i first2 = _mm256_unpacklo_epi32(row[2], row[3]); // c0 d0 c1 d1 c2 d2 c3 d3
+    __m256i first3 = _mm256_unpackhi_epi32(row[2], row[3]); // c4 d4 c5 d5 c6 d6 c7 d7
+    __m256i first4 = _mm256_unpacklo_epi32(row[4], row[5]); // e0 f0 e1 f1 e2 f2 e3 f3
+    __m256i first5 = _mm256_unpackhi_epi32(row[4], row[5]); // e4 f4 e5 f5 e6 f6 e7 f7
+    __m256i first6 = _mm256_unpacklo_epi32(row[6], row[7]); // g0 h0 g1 h1 g2 h2 g3 h3
+    __m256i first7 = _mm256_unpackhi_epi32(row[6], row[7]); // g4 h4 g5 h5 g6 h6 g7 h7
+
+    __m256i second0 = _mm256_unpacklo_epi64(first0, first2); // a0 b0 c0 d0 a1 b1 c1 d1
+    __m256i second1 = _mm256_unpackhi_epi64(first0, first2); // a2 b2 c2 d2 a3 b3 c3 d3
+    __m256i second2 = _mm256_unpacklo_epi64(first1, first3); // a4 b4 c4 d4 a5 b5 c5 d5
+    __m256i second3 = _mm256_unpackhi_epi64(first1, first3); // a6 b6 c6 d6 a7 b7 c7 d7
+    __m256i second4 = _mm256_unpacklo_epi64(first4, first6); // e0 f0 g0 h0 e1 f1 g1 h1
+    __m256i second5 = _mm256_unpackhi_epi64(first4, first6); // e2 f2 g2 h2 e3 f3 g3 h3
+    __m256i second6 = _mm256_unpacklo_epi64(first5, first7); // e4 f4 g4 h4 e5 f5 g5 h5
+    __m256i second7 = _mm256_unpackhi_epi64(first5, first7); // e6 f6 g6 h6 e7 f7 g7 h7
+
+    col[0] = _mm256_permute2x128_si256(second0, second4, 0x20);
+    col[1] = _mm256_permute2x128_si256(second1, second5, 0x20);
+    col[2] = _mm256_permute2x128_si256(second2, second6, 0x20);
+    col[3] = _mm256_permute2x128_si256(second3, second7, 0x20);
+    col[4] = _mm256_permute2x128_si256(second0, second4, 0x31);
+    col[5] = _mm256_permute2x128_si256(second1, second5, 0x31);
+    col[6] = _mm256_permute2x128_si256(second2, second6, 0x31);
+    col[7] = _mm256_permute2x128_si256(second3, second7, 0x31);
 }
 #endif
 
@@ -225,40 +267,15 @@ void pack_B<block_q8_0>(
         }
 
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            __m256i row[8], col[8];
+            __m256i row[8];
+            __m256i col[8];
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
                     row[col] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>((B_q + (j + col) * ldb_q + k_block)->qs));
                 }
             }
 
-            // transpose 8x8 int matrix
-            __m256i first0 = _mm256_unpacklo_epi32(row[0], row[1]); // a0 b0 a1 b1 a2 b2 a3 b3
-            __m256i first1 = _mm256_unpackhi_epi32(row[0], row[1]); // a4 b4 a5 b5 a6 b6 a7 b7 
-            __m256i first2 = _mm256_unpacklo_epi32(row[2], row[3]); // c0 d0 c1 d1 c2 d2 c3 d3
-            __m256i first3 = _mm256_unpackhi_epi32(row[2], row[3]); // c4 d4 c5 d5 c6 d6 c7 d7
-            __m256i first4 = _mm256_unpacklo_epi32(row[4], row[5]); // e0 f0 e1 f1 e2 f2 e3 f3
-            __m256i first5 = _mm256_unpackhi_epi32(row[4], row[5]); // e4 f4 e5 f5 e6 f6 e7 f7
-            __m256i first6 = _mm256_unpacklo_epi32(row[6], row[7]); // g0 h0 g1 h1 g2 h2 g3 h3
-            __m256i first7 = _mm256_unpackhi_epi32(row[6], row[7]); // g4 h4 g5 h5 g6 h6 g7 h7
-
-            __m256i second0 = _mm256_unpacklo_epi64(first0, first2); // a0 b0 c0 d0 a1 b1 c1 d1
-            __m256i second1 = _mm256_unpackhi_epi64(first0, first2); // a2 b2 c2 d2 a3 b3 c3 d3
-            __m256i second2 = _mm256_unpacklo_epi64(first1, first3); // a4 b4 c4 d4 a5 b5 c5 d5
-            __m256i second3 = _mm256_unpackhi_epi64(first1, first3); // a6 b6 c6 d6 a7 b7 c7 d7
-            __m256i second4 = _mm256_unpacklo_epi64(first4, first6); // e0 f0 g0 h0 e1 f1 g1 h1
-            __m256i second5 = _mm256_unpackhi_epi64(first4, first6); // e2 f2 g2 h2 e3 f3 g3 h3
-            __m256i second6 = _mm256_unpacklo_epi64(first5, first7); // e4 f4 g4 h4 e5 f5 g5 h5
-            __m256i second7 = _mm256_unpackhi_epi64(first5, first7); // e6 f6 h6 g6 e7 f7 g7 h7
-
-            col[0] = _mm256_permute2x128_si256(second0, second4, 0x20);
-            col[1] = _mm256_permute2x128_si256(second1, second5, 0x20);
-            col[2] = _mm256_permute2x128_si256(second2, second6, 0x20);
-            col[3] = _mm256_permute2x128_si256(second3, second7, 0x20);
-            col[4] = _mm256_permute2x128_si256(second0, second4, 0x31);
-            col[5] = _mm256_permute2x128_si256(second1, second5, 0x31);
-            col[6] = _mm256_permute2x128_si256(second2, second6, 0x31);
-            col[7] = _mm256_permute2x128_si256(second3, second7, 0x31);
+            transpose_8x8_i32_avx2(row, col);
 
             for (int i = 0; i < NR; ++i) {
                 _mm256_store_si256(reinterpret_cast<__m256i*>(B_qs_packed + i * QK8_0), col[i]);
@@ -329,41 +346,93 @@ void pack_B<block_q4_0>(
         }
 
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            __m256i row[8], col[8];
-            const __m256i off = _mm256_set1_epi8( 8 );
+            __m256i row[8];
+            __m256i col[8];
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
-                    row[col] = _mm256_sub_epi8(bytes_from_nibbles_32((B_q + (j + col) * ldb_q + k_block)->qs), off);
+                    row[col] = to_int8_q4_0((B_q + (j + col) * ldb_q + k_block)->qs);
                 }
             }
 
-            // transpose 8x8 int matrix
-            __m256i first0 = _mm256_unpacklo_epi32(row[0], row[1]); // a0 b0 a1 b1 a2 b2 a3 b3
-            __m256i first1 = _mm256_unpackhi_epi32(row[0], row[1]); // a4 b4 a5 b5 a6 b6 a7 b7 
-            __m256i first2 = _mm256_unpacklo_epi32(row[2], row[3]); // c0 d0 c1 d1 c2 d2 c3 d3
-            __m256i first3 = _mm256_unpackhi_epi32(row[2], row[3]); // c4 d4 c5 d5 c6 d6 c7 d7
-            __m256i first4 = _mm256_unpacklo_epi32(row[4], row[5]); // e0 f0 e1 f1 e2 f2 e3 f3
-            __m256i first5 = _mm256_unpackhi_epi32(row[4], row[5]); // e4 f4 e5 f5 e6 f6 e7 f7
-            __m256i first6 = _mm256_unpacklo_epi32(row[6], row[7]); // g0 h0 g1 h1 g2 h2 g3 h3
-            __m256i first7 = _mm256_unpackhi_epi32(row[6], row[7]); // g4 h4 g5 h5 g6 h6 g7 h7
+            transpose_8x8_i32_avx2(row, col);
 
-            __m256i second0 = _mm256_unpacklo_epi64(first0, first2); // a0 b0 c0 d0 a1 b1 c1 d1
-            __m256i second1 = _mm256_unpackhi_epi64(first0, first2); // a2 b2 c2 d2 a3 b3 c3 d3
-            __m256i second2 = _mm256_unpacklo_epi64(first1, first3); // a4 b4 c4 d4 a5 b5 c5 d5
-            __m256i second3 = _mm256_unpackhi_epi64(first1, first3); // a6 b6 c6 d6 a7 b7 c7 d7
-            __m256i second4 = _mm256_unpacklo_epi64(first4, first6); // e0 f0 g0 h0 e1 f1 g1 h1
-            __m256i second5 = _mm256_unpackhi_epi64(first4, first6); // e2 f2 g2 h2 e3 f3 g3 h3
-            __m256i second6 = _mm256_unpacklo_epi64(first5, first7); // e4 f4 g4 h4 e5 f5 g5 h5
-            __m256i second7 = _mm256_unpackhi_epi64(first5, first7); // e6 f6 h6 g6 e7 f7 g7 h7
+            for (int i = 0; i < NR; ++i) {
+                _mm256_store_si256(reinterpret_cast<__m256i*>(B_qs_packed + i * QK8_0), col[i]);
+            }
+            B_qs_packed += QK8_0 * NR;
+        }
+    }
+#else
+    static_assert(false, "pack_B<block_q4_0> is only supported on ARM NEON or x86 AVX2");
+#endif
+}
 
-            col[0] = _mm256_permute2x128_si256(second0, second4, 0x20);
-            col[1] = _mm256_permute2x128_si256(second1, second5, 0x20);
-            col[2] = _mm256_permute2x128_si256(second2, second6, 0x20);
-            col[3] = _mm256_permute2x128_si256(second3, second7, 0x20);
-            col[4] = _mm256_permute2x128_si256(second0, second4, 0x31);
-            col[5] = _mm256_permute2x128_si256(second1, second5, 0x31);
-            col[6] = _mm256_permute2x128_si256(second2, second6, 0x31);
-            col[7] = _mm256_permute2x128_si256(second3, second7, 0x31);
+template<>
+void pack_B<block_mxfp4>(
+    int nc, int K, const block_mxfp4* B_q, int ldb_q,
+    int8_t* B_qs_packed, float* B_d_packed)
+{
+#if defined(__ARM_NEON)
+    static_assert(NR == 4, "NR must be 4 for this implementation");
+    // Q4_0和Q8_0有相同的块大小QK
+    const int K_BLOCKS = K / QK_MXFP4;
+
+    const uint8x16_t m4b = vdupq_n_u8(0x0F);
+    const int8x16_t values = vld1q_s8(kvalues_mxfp4);
+
+    for (int j = 0; j < nc; j += NR) {
+        // Pack deltas
+        for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < nc) {
+                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
+                }
+            }
+        }
+
+        // Pack quants
+        for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+           int32x4x4_t b_buf0, b_buf1;
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < nc) {
+                    const uint8x16_t v_u8 = vld1q_u8((B_q + (j + col) * ldb_q + k_block)->qs);
+
+                    // 解包4-bit到8-bit并减去8
+                    const int8x16_t v_i8_l = ggml_vqtbl1q_s8(values, vandq_u8  (v_u8, m4b));
+                    const int8x16_t v_i8_h = ggml_vqtbl1q_s8(values, vshrq_n_u8(v_u8, 4));
+
+                    b_buf0.val[col] = vreinterpretq_s32_s8(v_i8_l);
+                    b_buf1.val[col] = vreinterpretq_s32_s8(v_i8_h);
+                }
+            }
+            vst4q_s32(reinterpret_cast<int32_t*>(B_qs_packed), b_buf0);
+            vst4q_s32(reinterpret_cast<int32_t*>(B_qs_packed + 16 * NR), b_buf1);
+            B_qs_packed += QK_MXFP4 * NR;
+        }
+    }
+#elif defined(__AVX2__)
+    static_assert(NR == 8, "NR must be 8 for this implementation");
+    const int K_BLOCKS = K / QK_MXFP4;
+
+    for (int j = 0; j < nc; j += NR) {
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < nc) {
+                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
+                }
+            }
+        }
+
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            __m256i row[8];
+            __m256i col[8];
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < nc) {
+                    row[col] = to_int8_mxfp4((B_q + (j + col) * ldb_q + k_block)->qs);
+                }
+            }
+
+            transpose_8x8_i32_avx2(row, col);
 
             for (int i = 0; i < NR; ++i) {
                 _mm256_store_si256(reinterpret_cast<__m256i*>(B_qs_packed + i * QK8_0), col[i]);
@@ -480,7 +549,7 @@ static void gemm_q8_0_microkernel_impl(
             sum_a_vec = _mm256_dpbusd_avx_epi32(sum_a_vec, _mm256_set1_epi8(1), a_vec);
 
             for (int i = 0; i < MR_T; ++i) {
-                __m256i a_vec = _mm256_set1_epi32(*((int*)(a_ptr + i * 4)));
+                __m256i a_vec = _mm256_set1_epi32(*((const int*)(a_ptr + i * 4)));
                 sum[i] = _mm256_dpbusd_avx_epi32(sum[i], b_vec, a_vec);
             }
             a_ptr += MR * 4; // Move to next set of A data
@@ -665,8 +734,6 @@ static void gemm_f32_ggml_indirect(
     constexpr int KC = 1024;
     constexpr int NC = 32;
 
-    const int M_CEIL = (M + MR - 1) / MR * MR;
-
     int8_t A_qs_packed[M_MAX * KC] __attribute__((aligned(64)));
     float A_d_packed[M_MAX * KC / QK8_0] __attribute__((aligned(64)));
 
@@ -759,7 +826,7 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
     if (Ctype != GGML_TYPE_F32)
         return false;
 
-    if (m % NR != 0 || n == 1)
+    if (m % NR != 0)
         return false;
 
     if (Btype == GGML_TYPE_F32) {
@@ -779,6 +846,15 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
                 gemm_f32_ggml<block_q4_0>(params, n, m, k,
                                    (const float*)B, ldb,
                                    (const block_q4_0*)A,
+                                   (float*)C, ldc);
+                return true;
+            }
+            case GGML_TYPE_MXFP4: {
+                // Note: The K dimension for the function is the number of float elements.
+                // For Q4_0 and Q8_0, this is the same.
+                gemm_f32_ggml<block_mxfp4>(params, n, m, k,
+                                   (const float*)B, ldb,
+                                   (const block_mxfp4*)A,
                                    (float*)C, ldc);
                 return true;
             }
@@ -858,6 +934,14 @@ void llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
                             batch, rows, cols,
                             (const float**)b_ptrs,
                             (const block_q4_0*)as + n_as * rows * (cols / QK4_0),
+                            (float**)c_ptrs
+                        );
+                        break;
+                    case GGML_TYPE_MXFP4:
+                        gemm_f32_ggml_indirect<block_mxfp4, MAX_BATCH>(
+                            batch, rows, cols,
+                            (const float**)b_ptrs,
+                            (const block_mxfp4*)as + n_as * rows * (cols / QK_MXFP4),
                             (float**)c_ptrs
                         );
                         break;
