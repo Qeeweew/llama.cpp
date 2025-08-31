@@ -881,13 +881,21 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
     c ~= as[:,:,i] @ b[:,i%r,t], i = ids[e,t] for all e,t in ids
 */
 
-void llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int rows, int n_expert, int n_expert_used, int n_tokens,
+bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int rows, int n_expert, int n_expert_used, int n_tokens,
                         const void *as, const float *b, int64_t ldb, const int32_t*ids, int64_t ld_ids, float* c, int64_t ldc, int Atype, bool broadcastb)
 {
 
     // printf("llamafile_sgemm_id: cols=%d, rows=%d, n_expert=%d, n_expert_used=%d, n_tokens=%d, Atype=%d\n broadcastb=%d\n",
     //        cols, rows, n_expert, n_expert_used, n_tokens, Atype, broadcastb);
 
+    if (n_expert_used * n_tokens < n_expert) {
+        return false;
+    }
+
+    if (!((Atype == GGML_TYPE_Q8_0) || Atype == GGML_TYPE_Q4_0 || Atype == GGML_TYPE_MXFP4)) {
+        return false;
+    }
+    
     const int ith = params->ith;
     const int nth = params->nth;
 
@@ -954,4 +962,6 @@ void llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
         n_as = ggml_threadpool_chunk_add(params->threadpool, 1);
     }
     ggml_barrier(params->threadpool);
+
+    return true;
 }

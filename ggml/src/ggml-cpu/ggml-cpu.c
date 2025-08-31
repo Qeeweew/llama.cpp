@@ -1485,13 +1485,14 @@ static void ggml_compute_forward_mul_mat_id(
     // printf("ne10 = %lld, ne11 = %lld, ne12 = %lld, ne13 = %lld\n", src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
     // printf("nb10 = %lld, nb11 = %lld, nb12 = %lld, nb13 = %lld\n", src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3]);
 
-    if ((type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q4_0) && src1->type == GGML_TYPE_F32) {
-        llamafile_sgemm_id(
+    if (src1->type == GGML_TYPE_F32) {
+        bool ret = llamafile_sgemm_id(
             params, src0->ne[0], src0->ne[1], src0->ne[2], dst->ne[1], src1->ne[2],
             src0->data, (const float*) src1->data, (int64_t) src1->nb[1] / 4, (const int32_t*) ids->data, (int64_t) ids->nb[1] / 4, (float*) dst->data, dst->nb[1] / 4,
-            type, src1->ne[1] == 1
-        );
-        return;
+            type, src1->ne[1] == 1);
+        if (ret) {
+            return;
+        }
     }
 
     void * wdata_cur = params->wdata;
