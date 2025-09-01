@@ -231,20 +231,12 @@ void pack_B<block_q8_0>(
     const int K_BLOCKS = K / QK8_0;
 
     for (int j = 0; j < nc; j += NR) {
-        // Pack deltas
-        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
-                }
-            }
-        }
-
-        // Pack quants
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             int32x4x4_t b_buf0, b_buf1;
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
+                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
+
                     b_buf0.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + (j + col) * ldb_q + k_block)->qs + 0));
                     b_buf1.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + (j + col) * ldb_q + k_block)->qs + 16));
                 }
@@ -259,18 +251,11 @@ void pack_B<block_q8_0>(
     const int K_BLOCKS = K / QK8_0;
     for (int j = 0; j < nc; j += NR) {
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
-                }
-            }
-        }
-
-        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             __m256i row[8];
             __m256i col[8];
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
+                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
                     row[col] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>((B_q + (j + col) * ldb_q + k_block)->qs));
                 }
             }
@@ -303,23 +288,14 @@ void pack_B<block_q4_0>(
     const int8x16_t  s8b = vdupq_n_s8(0x8);
 
     for (int j = 0; j < nc; j += NR) {
-        // Pack deltas
-        for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
-                }
-            }
-        }
-
-        // Pack quants
         for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
            int32x4x4_t b_buf0, b_buf1;
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
-                    const uint8x16_t v_u8 = vld1q_u8((B_q + (j + col) * ldb_q + k_block)->qs);
+                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
 
                     // 解包4-bit到8-bit并减去8
+                    const uint8x16_t v_u8 = vld1q_u8((B_q + (j + col) * ldb_q + k_block)->qs);
                     const int8x16_t v_i8_l = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(v_u8, m4b)), s8b);
                     const int8x16_t v_i8_h = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(v_u8, 4)), s8b);
 
@@ -338,18 +314,11 @@ void pack_B<block_q4_0>(
 
     for (int j = 0; j < nc; j += NR) {
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
-                }
-            }
-        }
-
-        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             __m256i row[8];
             __m256i col[8];
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
+                    *B_d_packed++ = GGML_CPU_FP16_TO_FP32((B_q + (j + col) * ldb_q + k_block)->d);
                     row[col] = to_int8_q4_0((B_q + (j + col) * ldb_q + k_block)->qs);
                 }
             }
@@ -381,23 +350,13 @@ void pack_B<block_mxfp4>(
     const int8x16_t values = vld1q_s8(kvalues_mxfp4);
 
     for (int j = 0; j < nc; j += NR) {
-        // Pack deltas
-        for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
-                }
-            }
-        }
-
-        // Pack quants
         for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
            int32x4x4_t b_buf0, b_buf1;
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
-                    const uint8x16_t v_u8 = vld1q_u8((B_q + (j + col) * ldb_q + k_block)->qs);
+                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
 
-                    // 解包4-bit到8-bit并减去8
+                    const uint8x16_t v_u8 = vld1q_u8((B_q + (j + col) * ldb_q + k_block)->qs);
                     const int8x16_t v_i8_l = ggml_vqtbl1q_s8(values, vandq_u8  (v_u8, m4b));
                     const int8x16_t v_i8_h = ggml_vqtbl1q_s8(values, vshrq_n_u8(v_u8, 4));
 
@@ -416,18 +375,11 @@ void pack_B<block_mxfp4>(
 
     for (int j = 0; j < nc; j += NR) {
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < nc) {
-                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
-                }
-            }
-        }
-
-        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             __m256i row[8];
             __m256i col[8];
             for (int col = 0; col < NR; ++col) {
                 if (j + col < nc) {
+                    *B_d_packed++ = GGML_E8M0_TO_FP32_HALF((B_q + (j + col) * ldb_q + k_block)->e);
                     row[col] = to_int8_mxfp4((B_q + (j + col) * ldb_q + k_block)->qs);
                 }
             }
