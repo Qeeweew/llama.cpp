@@ -826,9 +826,14 @@ struct MoETask {
     int batchsize;
 };
 
+struct TokenInfo {
+    int token_id;
+    int expert_idx;
+};
+
 static inline void preprocess_ids(int n_expert, int n_expert_used, int n_tokens,
                     const int32_t* ids, int64_t ld_ids,
-                    int* token_ids, int* expert_start, int* expert_counts) {
+                    TokenInfo* token_ids, int* expert_start, int* expert_counts) {
     memset(expert_counts, 0, n_expert * sizeof(int));
     memset(expert_start, 0, (n_expert + 1) * sizeof(int));
 
@@ -855,7 +860,7 @@ static inline void preprocess_ids(int n_expert, int n_expert_used, int n_tokens,
             int expert_id = ids[t * ld_ids + e];
             if (expert_id >= 0 && expert_id < n_expert) {
                 int pos = expert_start[expert_id] + expert_counts[expert_id]++;
-                token_ids[pos] = t;
+                token_ids[pos] = {t, e};
             }
         }
     }
@@ -904,7 +909,7 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
         return false;
     }
 
-    constexpr int MAX_BATCH = 64;
+    constexpr int MAX_BATCH = 32;
     
     const int ith = params->ith;
     const int nth = params->nth;
@@ -916,16 +921,14 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
     // 分配共享内存
     MoETask* tasks = (MoETask*)shared_mem;
     const int max_task_num = n_expert + (n_tokens * n_expert_used + MAX_BATCH - 1) / MAX_BATCH;
-    int* token_ids = (int*)(tasks + max_task_num);
-    int* task_count_ptr = token_ids + n_expert_used * n_tokens;
+    TokenInfo* token_ids = (TokenInfo*)(tasks + max_task_num);
 
     // 各部分内存大小计算
     size_t tasks_size = max_task_num * sizeof(MoETask);
-    size_t token_ids_size = n_expert_used * n_tokens * sizeof(int);
-    size_t task_count_size = 1 * sizeof(int);
+    size_t token_ids_size = n_expert_used * n_tokens * sizeof(TokenInfo);
 
     // 总空间
-    size_t total_shared_mem_size = tasks_size + token_ids_size + task_count_size;
+    size_t total_shared_mem_size = tasks_size + token_ids_size;
     if (total_shared_mem_size > shared_mem_size) {
         return -1;
     }
@@ -935,14 +938,12 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
         int expert_start[n_expert + 1];
         preprocess_ids(n_expert, n_expert_used, n_tokens, ids, ld_ids, token_ids, expert_start, expert_counts);
         int task_count = build_tasks(n_expert, expert_start, MAX_BATCH, tasks);
-        *task_count_ptr = task_count;
-        ggml_threadpool_chunk_set(params->threadpool, nth);
+        ggml_threadpool_chunk_set(params->threadpool, task_count - 1);
     }
     ggml_barrier(params->threadpool);
 
-    int task_count = *task_count_ptr;
-    int task_id = ith;
-    while (task_id < task_count) {
+    int task_id;
+    while ((task_id = ggml_threadpool_chunk_add(params->threadpool, -1)) >= 0) {
         const MoETask& task = tasks[task_id];
         int expert_id = task.expert_id;
         int batch_size = task.batchsize;
@@ -951,16 +952,8 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
         const float* b_ptrs[MAX_BATCH];
 
         for (int i = 0; i < batch_size; ++i) {
-            int token_id = token_ids[task.start + i];
-            int expert_idx = -1;
-            for (int e = 0; e < n_expert_used; ++e) {
-                if (ids[token_id * ld_ids + e] == expert_id) {
-                    expert_idx = e;
-                    break;
-                }
-            }
-            assert(expert_idx != -1);
-
+            int token_id = token_ids[task.start + i].token_id;
+            int expert_idx = token_ids[task.start + i].expert_idx; 
             if (broadcastb) {
                 b_ptrs[i] = &b[token_id * ldb];
             } else {
@@ -997,7 +990,6 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
             default:
                 assert(false);
         }
-        task_id = ggml_threadpool_chunk_add(params->threadpool, 1);
     }
     ggml_barrier(params->threadpool);
     return true;

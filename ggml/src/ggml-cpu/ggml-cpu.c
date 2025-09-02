@@ -2734,12 +2734,11 @@ struct ggml_cplan ggml_graph_plan(
                         // atomic_current_chunk
                         cur += CACHE_LINE_SIZE*n_as + CACHE_LINE_SIZE;
                         {
-                            const int MAX_BATCH = 64;
+                            const int MAX_BATCH = 32;
                             const int max_task_num = n_as + (node->ne[2] * node->ne[1] + MAX_BATCH - 1) / MAX_BATCH;
                             size_t tasks_size = max_task_num * 3 * sizeof(int);
-                            size_t token_ids_size = n_as * node->ne[2] * sizeof(int);
-                            size_t task_count_size = 1 * sizeof(int);
-                            size_t total_shared_mem_size = tasks_size + token_ids_size + task_count_size;
+                            size_t token_ids_size = n_as * node->ne[2] * 2 * sizeof(int);
+                            size_t total_shared_mem_size = tasks_size + token_ids_size;
                             cur = MAX(cur, total_shared_mem_size);
                         }
                     } break;
