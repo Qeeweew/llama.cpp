@@ -820,6 +820,62 @@ bool llamafile_sgemm(const struct ggml_compute_params * params, int64_t m, int64
     return false;
 }
 
+struct MoETask {
+    int expert_id;
+    int start;
+    int batchsize;
+};
+
+static inline void preprocess_ids(int n_expert, int n_expert_used, int n_tokens,
+                    const int32_t* ids, int64_t ld_ids,
+                    int* token_ids, int* expert_start, int* expert_counts) {
+    memset(expert_counts, 0, n_expert * sizeof(int));
+    memset(expert_start, 0, (n_expert + 1) * sizeof(int));
+
+    // 计数每个 expert 的 token 数量
+    for (int t = 0; t < n_tokens; ++t) {
+        for (int e = 0; e < n_expert_used; ++e) {
+            int expert_id = ids[t * ld_ids + e];
+            if (expert_id >= 0 && expert_id < n_expert) {
+                expert_counts[expert_id]++;
+            }
+        }
+    }
+
+    // 构建前缀和
+    for (int i = 0; i < n_expert; ++i) {
+        expert_start[i + 1] = expert_start[i] + expert_counts[i];
+    }
+
+    memset(expert_counts, 0, n_expert * sizeof(int));
+
+    // 构建 token_ids
+    for (int t = 0; t < n_tokens; ++t) {
+        for (int e = 0; e < n_expert_used; ++e) {
+            int expert_id = ids[t * ld_ids + e];
+            if (expert_id >= 0 && expert_id < n_expert) {
+                int pos = expert_start[expert_id] + expert_counts[expert_id]++;
+                token_ids[pos] = t;
+            }
+        }
+    }
+}
+
+static inline int build_tasks(int n_expert, const int* expert_start,
+                int max_batch, MoETask* tasks) {
+    int task_count = 0;
+    for (int e = 0; e < n_expert; ++e) {
+        int start = expert_start[e];
+        int count = expert_start[e + 1] - expert_start[e];
+        for (int i = 0; i < count; i += max_batch) {
+            int batch_size = std::min(max_batch, count - i);
+            tasks[task_count++] = {e, start + i, batch_size};
+        }
+    }
+    return task_count;
+}
+
+
 /*
     c = ggml_mul_mat_id(ctx, as, b, ids);
 
@@ -847,73 +903,102 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
     if (!((Atype == GGML_TYPE_Q8_0) || Atype == GGML_TYPE_Q4_0 || Atype == GGML_TYPE_MXFP4)) {
         return false;
     }
+
+    constexpr int MAX_BATCH = 64;
     
     const int ith = params->ith;
     const int nth = params->nth;
 
+    // 共享内存结构
+    const size_t shared_mem_size = params->wsize;
+    char* shared_mem = (char*)params->wdata;
+
+    // 分配共享内存
+    MoETask* tasks = (MoETask*)shared_mem;
+    const int max_task_num = n_expert + (n_tokens * n_expert_used + MAX_BATCH - 1) / MAX_BATCH;
+    int* token_ids = (int*)(tasks + max_task_num);
+    int* task_count_ptr = token_ids + n_expert_used * n_tokens;
+
+    // 各部分内存大小计算
+    size_t tasks_size = max_task_num * sizeof(MoETask);
+    size_t token_ids_size = n_expert_used * n_tokens * sizeof(int);
+    size_t task_count_size = 1 * sizeof(int);
+
+    // 总空间
+    size_t total_shared_mem_size = tasks_size + token_ids_size + task_count_size;
+    if (total_shared_mem_size > shared_mem_size) {
+        return -1;
+    }
+
     if (ith == 0) {
+        int expert_counts[n_expert];
+        int expert_start[n_expert + 1];
+        preprocess_ids(n_expert, n_expert_used, n_tokens, ids, ld_ids, token_ids, expert_start, expert_counts);
+        int task_count = build_tasks(n_expert, expert_start, MAX_BATCH, tasks);
+        *task_count_ptr = task_count;
         ggml_threadpool_chunk_set(params->threadpool, nth);
     }
     ggml_barrier(params->threadpool);
 
-    int n_as = ith;
-    constexpr int MAX_BATCH = 64;
-    float* c_ptrs[MAX_BATCH];
-    const float* b_ptrs[MAX_BATCH];
+    int task_count = *task_count_ptr;
+    int task_id = ith;
+    while (task_id < task_count) {
+        const MoETask& task = tasks[task_id];
+        int expert_id = task.expert_id;
+        int batch_size = task.batchsize;
 
-    while (n_as < n_expert) {
-        int token_id = 0;
-        int batch = 0;
-        while (token_id < n_tokens) {
-            for (int i = 0; i < n_expert_used; ++i) {
-                if (ids[token_id * ld_ids + i] == n_as) {
-                    if (broadcastb) {
-                        b_ptrs[batch] = &b[token_id * ldb];
-                    } else {
-                        b_ptrs[batch] = &b[((token_id * n_expert_used) + i) * ldb];
-                    }
-                    c_ptrs[batch] = &c[token_id * (ldc * n_expert_used) + i * ldc];
-                    batch++;
+        float* c_ptrs[MAX_BATCH];
+        const float* b_ptrs[MAX_BATCH];
+
+        for (int i = 0; i < batch_size; ++i) {
+            int token_id = token_ids[task.start + i];
+            int expert_idx = -1;
+            for (int e = 0; e < n_expert_used; ++e) {
+                if (ids[token_id * ld_ids + e] == expert_id) {
+                    expert_idx = e;
                     break;
                 }
             }
-            token_id++;
-            if (batch == MAX_BATCH || (token_id == n_tokens && batch > 0)) {
-                // printf("%d: batch=%d, n_as=%d\n", ith, batch, n_as);
-                switch (Atype) {
-                    case GGML_TYPE_Q8_0:
-                        gemm_f32_ggml_indirect<block_q8_0, MAX_BATCH>(
-                            batch, rows, cols,
-                            (const float**)b_ptrs,
-                            (const block_q8_0*)as + n_as * rows * (cols / QK8_0),
-                            (float**)c_ptrs
-                        );
-                        break;
-                    case GGML_TYPE_Q4_0:
-                        gemm_f32_ggml_indirect<block_q4_0, MAX_BATCH>(
-                            batch, rows, cols,
-                            (const float**)b_ptrs,
-                            (const block_q4_0*)as + n_as * rows * (cols / QK4_0),
-                            (float**)c_ptrs
-                        );
-                        break;
-                    case GGML_TYPE_MXFP4:
-                        gemm_f32_ggml_indirect<block_mxfp4, MAX_BATCH>(
-                            batch, rows, cols,
-                            (const float**)b_ptrs,
-                            (const block_mxfp4*)as + n_as * rows * (cols / QK_MXFP4),
-                            (float**)c_ptrs
-                        );
-                        break;
-                    default:
-                        assert(false);
-                }
-                batch = 0;
+            assert(expert_idx != -1);
+
+            if (broadcastb) {
+                b_ptrs[i] = &b[token_id * ldb];
+            } else {
+                b_ptrs[i] = &b[(token_id * n_expert_used + expert_idx) * ldb];
             }
+            c_ptrs[i] = &c[token_id * (ldc * n_expert_used) + expert_idx * ldc];
         }
-        n_as = ggml_threadpool_chunk_add(params->threadpool, 1);
+
+        switch (Atype) {
+            case GGML_TYPE_Q8_0:
+                gemm_f32_ggml_indirect<block_q8_0, MAX_BATCH>(
+                    batch_size, rows, cols,
+                    (const float**)b_ptrs,
+                    (const block_q8_0*)as + expert_id * rows * (cols / QK8_0),
+                    (float**)c_ptrs
+                );
+                break;
+            case GGML_TYPE_Q4_0:
+                gemm_f32_ggml_indirect<block_q4_0, MAX_BATCH>(
+                    batch_size, rows, cols,
+                    (const float**)b_ptrs,
+                    (const block_q4_0*)as + expert_id * rows * (cols / QK4_0),
+                    (float**)c_ptrs
+                );
+                break;
+            case GGML_TYPE_MXFP4:
+                gemm_f32_ggml_indirect<block_mxfp4, MAX_BATCH>(
+                    batch_size, rows, cols,
+                    (const float**)b_ptrs,
+                    (const block_mxfp4*)as + expert_id * rows * (cols / QK_MXFP4),
+                    (float**)c_ptrs
+                );
+                break;
+            default:
+                assert(false);
+        }
+        task_id = ggml_threadpool_chunk_add(params->threadpool, 1);
     }
     ggml_barrier(params->threadpool);
-
     return true;
 }
