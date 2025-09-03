@@ -30,12 +30,12 @@ static inline __m256i to_int8_q4_0(const uint8_t * rsi)
 
 static inline __m256i to_int8_mxfp4(const uint8_t * rsi)
 {
-    const __m128i values128 = _mm_loadu_si128((const __m128i*)kvalues_mxfp4);
+    const __m256i values128 = _mm256_loadu2_m128i((const __m128i*)kvalues_mxfp4, (const __m128i*)kvalues_mxfp4);
     const __m128i tmp = _mm_loadu_si128((const __m128i *)rsi);
-    const __m128i m4b  = _mm_set1_epi8(0x0f);
-    return _mm256_set_m128i(_mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(tmp, 4), m4b)),
-                                              _mm_shuffle_epi8(values128, _mm_and_si128(tmp, m4b)));
+    const __m256i m4b  = _mm256_set1_epi8(0x0f);
+    return _mm256_shuffle_epi8(values128, _mm256_and_si256(_mm256_set_m128i(_mm_srli_epi16(tmp, 4), tmp), m4b));
 }
+
 // Helper function to transpose an 8x8 matrix of 32-bit integers using AVX2
 static inline void transpose_8x8_i32_avx2(__m256i row[8], __m256i col[8]) {
     __m256i first0 = _mm256_unpacklo_epi32(row[0], row[1]); // a0 b0 a1 b1 a2 b2 a3 b3
@@ -834,9 +834,6 @@ struct TokenInfo {
 static inline void preprocess_ids(int n_expert, int n_expert_used, int n_tokens,
                     const int32_t* ids, int64_t ld_ids,
                     TokenInfo* token_ids, int* expert_start, int* expert_counts) {
-    memset(expert_counts, 0, n_expert * sizeof(int));
-    memset(expert_start, 0, (n_expert + 1) * sizeof(int));
-
     // 计数每个 expert 的 token 数量
     for (int t = 0; t < n_tokens; ++t) {
         for (int e = 0; e < n_expert_used; ++e) {
@@ -934,10 +931,10 @@ bool llamafile_sgemm_id(const struct ggml_compute_params * params, int cols, int
     }
 
     if (ith == 0) {
-        int expert_counts[n_expert];
-        int expert_start[n_expert + 1];
-        preprocess_ids(n_expert, n_expert_used, n_tokens, ids, ld_ids, token_ids, expert_start, expert_counts);
-        int task_count = build_tasks(n_expert, expert_start, MAX_BATCH, tasks);
+        std::vector<int> expert_counts(n_expert, 0);
+        std::vector<int> expert_start(n_expert + 1, 0);
+        preprocess_ids(n_expert, n_expert_used, n_tokens, ids, ld_ids, token_ids, expert_start.data(), expert_counts.data());
+        int task_count = build_tasks(n_expert, expert_start.data(), MAX_BATCH, tasks);
         ggml_threadpool_chunk_set(params->threadpool, task_count - 1);
     }
     ggml_barrier(params->threadpool);
