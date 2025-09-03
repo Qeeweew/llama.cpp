@@ -30,7 +30,8 @@ static inline __m256i to_int8_q4_0(const uint8_t * rsi)
 
 static inline __m256i to_int8_mxfp4(const uint8_t * rsi)
 {
-    const __m256i values128 = _mm256_loadu2_m128i((const __m128i*)kvalues_mxfp4, (const __m128i*)kvalues_mxfp4);
+    const __m128i tmp_values = _mm_loadu_si128( (const __m128i*)kvalues_mxfp4);
+    const __m256i values128 = _mm256_set_m128i(tmp_values, tmp_values);
     const __m128i tmp = _mm_loadu_si128((const __m128i *)rsi);
     const __m256i m4b  = _mm256_set1_epi8(0x0f);
     return _mm256_shuffle_epi8(values128, _mm256_and_si256(_mm256_set_m128i(_mm_srli_epi16(tmp, 4), tmp), m4b));
@@ -489,7 +490,7 @@ static void gemm_q8_0_microkernel_impl(
     for (int k_block = 0; k_block < KC_BLOCKS; ++k_block) {
         __m256i sum[MR];
         for (int i = 0; i < MR_T; ++i) sum[i] = _mm256_setzero_si256();
-
+ 
 #if defined(__AVXVNNI__)
         __m256i sum_a_vec = _mm256_setzero_si256();
 
@@ -524,9 +525,9 @@ static void gemm_q8_0_microkernel_impl(
             __m256i b_vec_abs = _mm256_sign_epi8(b_vec, b_vec); // abs
             // Process each row of A
             for (int i = 0; i < MR_T; ++i) {
-                __m256i a_vec = _mm256_set1_epi32(*((int*)(a_ptr + i * 4)));
+                __m256i a_vec = _mm256_set1_epi32(*((const int*)(a_ptr + i * 4)));
                 __m256i a_vec_sign_b = _mm256_sign_epi8(a_vec, b_vec);
-                sum[i] += _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(b_vec_abs, a_vec_sign_b));
+                    sum[i] += _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(b_vec_abs, a_vec_sign_b));
             }
             a_ptr += MR * 4; // Move to next set of A data
         }
@@ -614,7 +615,7 @@ static void gemm_f32_ggml(
     const int M_blocks_per_thread = (n_m_blocks + nth - 1) / nth;
     const int m_start_block = ith * M_blocks_per_thread;
     const int m_end_block = std::min((ith + 1) * M_blocks_per_thread, n_m_blocks);
-    
+
     const int m_start = m_start_block * MR;
     const int m_end = std::min(m_end_block * MR, M);
 
@@ -627,47 +628,47 @@ static void gemm_f32_ggml(
     // 阶段 2: 并行化 GEMM 计算
     // =================================================================
     const int N_chunks = (N + NC - 1) / NC;
-    if (ith == 0) {
-        ggml_threadpool_chunk_set(params->threadpool, nth);
-    }
+        if (ith == 0) {
+            ggml_threadpool_chunk_set(params->threadpool, nth);
+        }
     ggml_barrier(params->threadpool);
 
-    int n_chunk_id = ith;
-    while(n_chunk_id < N_chunks) {
-        const int jc = n_chunk_id * NC;
-        const int nc = std::min(NC, N - jc);
+        int n_chunk_id = ith;
+        while(n_chunk_id < N_chunks) {
+            const int jc = n_chunk_id * NC;
+            const int nc = std::min(NC, N - jc);
 
         // B的打包缓冲区是线程私有的（在栈上）
         int8_t B_qs_packed[KC * NC] __attribute__((aligned(64)));
         float B_d_packed[(KC / QK8_0) * NC] __attribute__((aligned(64)));
 
-        for (int kc = 0; kc < K; kc += KC) {
-            const int kc_size = std::min(KC, K - kc);
-            const int kc_blocks = kc_size / QK8_0;
-            const int k_block_offset = kc / QK8_0;
-            
-            pack_B<B_TYPE>(nc, kc_size, B_q + jc * K_BLOCKS + k_block_offset, K_BLOCKS, B_qs_packed, B_d_packed);
+            for (int kc = 0; kc < K; kc += KC) {
+                const int kc_size = std::min(KC, K - kc);
+                const int kc_blocks = kc_size / QK8_0;
+                const int k_block_offset = kc / QK8_0;
 
-            for (int ic = 0; ic < M; ic += MC) {
-                const int mc = std::min(MC, M - ic);
+                pack_B<B_TYPE>(nc, kc_size, B_q + jc * K_BLOCKS + k_block_offset, K_BLOCKS, B_qs_packed, B_d_packed);
 
-                for (int jr = 0; jr < nc; jr += NR) {
-                    for (int ir = 0; ir < mc; ir += MR) {
-                         gemm_q8_0_microkernel(
-                            kc_size, std::min(MR, mc - ir),
-                            A_qs_packed + (ic + ir) * K + kc * MR,
-                            A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
-                            B_qs_packed + jr * kc_size,
-                            B_d_packed + jr * kc_blocks,
-                            C + (ic + ir) * ldc + (jc + jr), ldc,
-                            kc != 0
-                        );
+                for (int ic = 0; ic < M; ic += MC) {
+                    const int mc = std::min(MC, M - ic);
+
+                    for (int jr = 0; jr < nc; jr += NR) {
+                        for (int ir = 0; ir < mc; ir += MR) {
+                             gemm_q8_0_microkernel(
+                                    kc_size, std::min(MR, mc - ir),
+                                    A_qs_packed + (ic + ir) * K + kc * MR,
+                                    A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
+                                    B_qs_packed + jr * kc_size,
+                                    B_d_packed + jr * kc_blocks,
+                                    C + (ic + ir) * ldc + (jc + jr), ldc,
+                                    kc != 0
+                                );
+                        }
                     }
                 }
             }
+            n_chunk_id = ggml_threadpool_chunk_add(params->threadpool, 1);
         }
-        n_chunk_id = ggml_threadpool_chunk_add(params->threadpool, 1);
-    }
     ggml_barrier(params->threadpool);
 }
 
