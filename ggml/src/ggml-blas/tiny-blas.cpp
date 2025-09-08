@@ -6,6 +6,7 @@
 #include "ggml-quants.h"
 #include "tiny-blas.h"
 
+#include <iostream>
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -399,6 +400,49 @@ void pack_B<block_mxfp4>(
 #endif
 }
 
+const size_t ALIGNMENT = 64; // 64 bytes for AVX-512 or general good practice
+
+// --- 线程局部缓冲区管理 (简单的内存池) ---
+class ThreadLocalBufferArena {
+private:
+    size_t current_offset;
+    float* base_ptr;
+    size_t total_arena_size;
+
+public:
+    ThreadLocalBufferArena(size_t total_arena_size) : current_offset(0), base_ptr(nullptr), total_arena_size(total_arena_size) {
+        base_ptr = (float*)aligned_alloc(ALIGNMENT, total_arena_size);
+        if (!base_ptr) {
+            exit(1);
+        }
+    }
+
+    ~ThreadLocalBufferArena() {
+        if (base_ptr) {
+            free(base_ptr);
+        }
+    }
+
+    // Allocate aligned memory from the arena
+    void* allocate(size_t size) {
+        size_t aligned_size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+        if (current_offset + aligned_size > total_arena_size) {
+            std::cerr << "Thread " << omp_get_thread_num() << ": Arena out of memory! Requested " 
+                      << aligned_size << ", available " << (total_arena_size - current_offset) << std::endl;
+            exit(1);
+        }
+        float* ptr = (float*)((char*)base_ptr + current_offset);
+        current_offset += aligned_size;
+        return ptr;
+    }
+
+    // Reset the arena for reuse (don't actually free, just reset offset)
+    void reset() {
+        current_offset = 0;
+    }
+};
+
+static thread_local ThreadLocalBufferArena tls_arena(256 * 1024);
 
 // 核心计算Kernel模板，针对不同的mr值进行特化以避免不必要的计算
 template<int MR_T>
@@ -626,8 +670,8 @@ static void gemm_f32_ggml(
 
         #pragma omp barrier
 
-        int8_t B_qs_packed[KC * NC] __attribute__((aligned(64)));
-        float B_d_packed[(KC / QK8_0) * NC] __attribute__((aligned(64)));
+        int8_t* B_qs_packed = (int8_t*) tls_arena.allocate(NC * KC * sizeof(int8_t));
+        float* B_d_packed = (float*) tls_arena.allocate( KC * NC / QK8_0 * sizeof(float));
 
         #pragma omp for schedule(dynamic)
         for (int jc = 0; jc < N; jc += NC) {
@@ -659,6 +703,7 @@ static void gemm_f32_ggml(
                 }
             }
         }
+        tls_arena.reset();
     }
 }
 
@@ -677,11 +722,11 @@ static void gemm_f32_ggml_indirect(
     constexpr int KC = 1024;
     constexpr int NC = 32;
 
-    int8_t A_qs_packed[M_MAX * KC] __attribute__((aligned(64)));
-    float A_d_packed[M_MAX * KC / QK8_0] __attribute__((aligned(64)));
+    int8_t* A_qs_packed = (int8_t*) tls_arena.allocate(M_MAX * KC * sizeof(int8_t));
+    float* A_d_packed = (float*) tls_arena.allocate(M_MAX * KC / QK8_0 * sizeof(float));
 
-    int8_t B_qs_packed[KC * NC] __attribute__((aligned(64)));
-    float B_d_packed[(KC / QK8_0) * NC] __attribute__((aligned(64)));
+    int8_t* B_qs_packed = (int8_t*) tls_arena.allocate(NC * KC * sizeof(int8_t));
+    float* B_d_packed = (float*) tls_arena.allocate( KC * NC / QK8_0 * sizeof(float));
 
     for (int kc = 0; kc < K; kc += KC) {
         const int kc_size = std::min(KC, K - kc);
@@ -721,6 +766,7 @@ static void gemm_f32_ggml_indirect(
             }
         }
     }
+    tls_arena.reset();
 }
 
 bool tiny_sgemm(int64_t m, int64_t n, int64_t k,
@@ -848,7 +894,7 @@ bool tiny_moe_sgemm(int cols, int rows, int n_expert, int n_expert_used, int n_t
     preprocess_ids(n_expert, n_expert_used, n_tokens, ids, ld_ids, token_ids, expert_start.data(), expert_counts.data());
     int task_count = build_tasks(n_expert, expert_start.data(), MAX_BATCH, tasks);
 
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic)
     for (int task_id = 0; task_id < task_count; task_id++) {
         const MoETask& task = tasks[task_id];
         int expert_id = task.expert_id;
