@@ -289,7 +289,7 @@ static bool ggml_backend_blas_device_supports_op(ggml_backend_dev_t dev, const s
 
             const int64_t ne1 = op->ne[1];
 
-            const int64_t min_batch = 2;
+            const int64_t min_batch = 1;
 
             return ggml_is_contiguous(src0) &&
                    src1->type == GGML_TYPE_F32 &&
