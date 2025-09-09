@@ -70,19 +70,6 @@ static inline void transpose_8x8_i32_avx2(__m256i row[8], __m256i col[8]) {
 }
 #endif
 
-template<typename B_TYPE>
-static void gemm_f32_ggml(const struct ggml_compute_params * params, int M, int N, int K,
-                           const float* A, int lda, const B_TYPE* B_q, int ldb_q_unused,
-                           float* C, int ldc);
-static inline void quantize_block_q8_0(const float *x, float* y_d, int8_t* y_qs);
-static void pack_A_q8_0_f32(int M, int K, const float* A, int lda, int8_t* A_qs_packed, float* A_d_packed);
-static void pack_A_q8_0_f32(int M, int K, const float** A, int offset, int8_t* A_qs_packed, float* A_d_packed);
-
-// B矩阵打包函数的模板声明
-template<typename B_TYPE>
-static void pack_B(int nc, int K, const B_TYPE* B_q, int ldb_q, int8_t* B_qs_packed, float* B_d_packed);
-
-
 // 量化一个32个float的块为q8_0格式
 static inline void quantize_block_q8_0(const float *x, float* y_d, int8_t* y_qs) {
 #if defined(__ARM_NEON)
@@ -165,7 +152,7 @@ static inline void quantize_block_q8_0(const float *x, float* y_d, int8_t* y_qs)
 
 // 打包矩阵A (F32) 的一个块，由单个线程调用
 // 这个函数与B的类型无关，保持不变
-void pack_A_q8_0_f32(
+static void pack_A_q8_0_f32(
     int M, int K,
     const float* A, int lda,
     int8_t* A_qs_packed, float* A_d_packed)
@@ -192,7 +179,7 @@ void pack_A_q8_0_f32(
     }
 }
 
-void pack_A_q8_0_f32(
+static void pack_A_q8_0_f32(
     int M, int K,
     const float** A, int offset,
     int8_t* A_qs_packed, float* A_d_packed)
@@ -222,6 +209,10 @@ void pack_A_q8_0_f32(
 // =================================================================================================
 // B 矩阵打包模板特化
 // =================================================================================================
+
+// B矩阵打包函数的模板声明
+template<typename B_TYPE>
+static void pack_B(int nc, int K, const B_TYPE* B_q, int ldb_q, int8_t* B_qs_packed, float* B_d_packed);
 
 // 模板特化 for block_q8_0
 template<>
@@ -608,10 +599,12 @@ static void gemm_q8_0_microkernel(
         case 2: gemm_q8_0_microkernel_impl<2>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 3: gemm_q8_0_microkernel_impl<3>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 4: gemm_q8_0_microkernel_impl<4>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+#if (defined(__AVX2__) && MR == 8) || (defined(__ARM_NEON) && MR == 8)
         case 5: gemm_q8_0_microkernel_impl<5>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 6: gemm_q8_0_microkernel_impl<6>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 7: gemm_q8_0_microkernel_impl<7>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 8: gemm_q8_0_microkernel_impl<8>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+#endif
         default:
             assert(false); // mr的值应该在[1, 8]的范围内
             break;
