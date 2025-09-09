@@ -882,6 +882,7 @@ static void gemm_f32_ggml(
                         C + j, N
                     );
                 }
+                tls_arena.reset();
             }
             return;
         }
