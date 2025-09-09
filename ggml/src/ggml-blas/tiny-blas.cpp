@@ -17,6 +17,29 @@
 #include <arm_neon.h>
 #define MR 8
 #define NR 4
+static inline void transpose_4x4(int32x4x4_t &b_buf) {
+    // 第一步：对行进行交错操作
+    int32x4x2_t tmp0 = vtrnq_s32(b_buf.val[0], b_buf.val[1]); // 处理第0行和第1行
+    int32x4x2_t tmp1 = vtrnq_s32(b_buf.val[2], b_buf.val[3]); // 处理第2行和第3行
+    
+    // 第二步：重新排列结果
+    // tmp0.val[0] = [a00, a10, a02, a12]
+    // tmp0.val[1] = [a01, a11, a03, a13]
+    // tmp1.val[0] = [a20, a30, a22, a32]
+    // tmp1.val[1] = [a21, a31, a23, a33]
+    
+    // 提取并重新组合
+    int32x4_t row0 = vcombine_s32(vget_low_s32(tmp0.val[0]), vget_low_s32(tmp1.val[0]));
+    int32x4_t row1 = vcombine_s32(vget_low_s32(tmp0.val[1]), vget_low_s32(tmp1.val[1]));
+    int32x4_t row2 = vcombine_s32(vget_high_s32(tmp0.val[0]), vget_high_s32(tmp1.val[0]));
+    int32x4_t row3 = vcombine_s32(vget_high_s32(tmp0.val[1]), vget_high_s32(tmp1.val[1]));
+    
+    b_buf.val[0] = row0;
+    b_buf.val[1] = row1;
+    b_buf.val[2] = row2;
+    b_buf.val[3] = row3;
+}
+
 #elif defined(__AVX2__)
 #include <immintrin.h>
 #define MR 8
@@ -429,42 +452,36 @@ static void gemm_q8_0_microkernel_unpacked_b_impl(
         const int8_t* a_ptr = A_qs_packed + k_block * QK8_0 * MR;
         const float* ad_ptr = A_d_packed + k_block * MR;
 
-        // On-the-fly packing of B for one k_block
-        int8_t b_qs_packed_tmp[QK8_0 * NR] __attribute__((aligned(64)));
-        ggml_half b_d_packed_tmp[NR] __attribute__((aligned(64)));
-        {
-            int32x4x4_t b_buf0, b_buf1;
-            for (int col = 0; col < n_rem; ++col) {
-                b_d_packed_tmp[col] = (B_q + col * ldb_q + k_block)->d;
-                b_buf0.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + col * ldb_q + k_block)->qs + 0));
-                b_buf1.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + col * ldb_q + k_block)->qs + 16));
-            }
-            vst4q_s32(reinterpret_cast<int32_t*>(b_qs_packed_tmp), b_buf0);
-            vst4q_s32(reinterpret_cast<int32_t*>(b_qs_packed_tmp + 16 * NR), b_buf1);
-        }
-
-        const int8_t* b_ptr = b_qs_packed_tmp;
-
         int32x4_t sum_v[MR];
         for (int i = 0; i < MR_T; ++i) sum_v[i] = vdupq_n_s32(0);
-
-        for (int k4_step = 0; k4_step < QK8_0 / 4; ++k4_step) {
-            int8x16_t a_vec_0 = vld1q_s8(a_ptr); a_ptr += 16;
-            int8x16_t a_vec_1; if constexpr (MR_T > 4) a_vec_1 = vld1q_s8(a_ptr);
-            a_ptr += 16;
-
-            int8x16_t b_vec = vld1q_s8(b_ptr); b_ptr += 16;
-
-            if constexpr (MR_T > 0) sum_v[0] = vdotq_laneq_s32(sum_v[0], b_vec, a_vec_0, 0);
-            if constexpr (MR_T > 1) sum_v[1] = vdotq_laneq_s32(sum_v[1], b_vec, a_vec_0, 1);
-            if constexpr (MR_T > 2) sum_v[2] = vdotq_laneq_s32(sum_v[2], b_vec, a_vec_0, 2);
-            if constexpr (MR_T > 3) sum_v[3] = vdotq_laneq_s32(sum_v[3], b_vec, a_vec_0, 3);
-            if constexpr (MR_T > 4) sum_v[4] = vdotq_laneq_s32(sum_v[4], b_vec, a_vec_1, 0);
-            if constexpr (MR_T > 5) sum_v[5] = vdotq_laneq_s32(sum_v[5], b_vec, a_vec_1, 1);
-            if constexpr (MR_T > 6) sum_v[6] = vdotq_laneq_s32(sum_v[6], b_vec, a_vec_1, 2);
-            if constexpr (MR_T > 7) sum_v[7] = vdotq_laneq_s32(sum_v[7], b_vec, a_vec_1, 3);
+        for (int k16 = 0; k16 < QK8_0; k16 += 16) {
+            int32x4x4_t b_buf;
+            for (int col = 0; col < n_rem; ++col) {
+                b_buf.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + col * ldb_q + k_block)->qs + k16));
+            }
+            transpose_4x4(b_buf);
+            for (int k4 = 0; k4 < 16; k4 += 4) {
+                int8x16_t a_vec_0, a_vec_1;
+                a_vec_0 = vld1q_s8(a_ptr);
+                a_ptr += 16;
+                if constexpr (MR_T > 4) a_vec_1 = vld1q_s8(a_ptr);
+                a_ptr += 16;
+                int8x16_t b_vec = vreinterpretq_s8_s32(b_buf.val[k4 / 4]);
+                if constexpr (MR_T > 0) sum_v[0] = vdotq_laneq_s32(sum_v[0], b_vec, a_vec_0, 0);
+                if constexpr (MR_T > 1) sum_v[1] = vdotq_laneq_s32(sum_v[1], b_vec, a_vec_0, 1);
+                if constexpr (MR_T > 2) sum_v[2] = vdotq_laneq_s32(sum_v[2], b_vec, a_vec_0, 2);
+                if constexpr (MR_T > 3) sum_v[3] = vdotq_laneq_s32(sum_v[3], b_vec, a_vec_0, 3);
+                if constexpr (MR_T > 4) sum_v[4] = vdotq_laneq_s32(sum_v[4], b_vec, a_vec_1, 0);
+                if constexpr (MR_T > 5) sum_v[5] = vdotq_laneq_s32(sum_v[5], b_vec, a_vec_1, 1);
+                if constexpr (MR_T > 6) sum_v[6] = vdotq_laneq_s32(sum_v[6], b_vec, a_vec_1, 2);
+                if constexpr (MR_T > 7) sum_v[7] = vdotq_laneq_s32(sum_v[7], b_vec, a_vec_1, 3);
+            }
         }
 
+        ggml_half b_d_packed_tmp[NR];
+        for (int col = 0; col < n_rem; ++col) {
+            b_d_packed_tmp[col] = (B_q + col * ldb_q + k_block)->d;
+        }
         const float32x4_t d_b_v = vcvt_f32_f16(vld1_f16((const __fp16 *) b_d_packed_tmp));
         float32x4_t d_a_v0, d_a_v1;
         d_a_v0 = vld1q_f32(ad_ptr);
@@ -867,8 +884,6 @@ static void gemm_f32_ggml(
                         }
                     }
                 }
-
-                #pragma omp barrier
 
                 // 2. 沿N维度并行计算。每个线程处理不同的列。
                 #pragma omp for schedule(dynamic)
