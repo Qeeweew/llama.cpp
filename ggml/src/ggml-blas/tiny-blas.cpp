@@ -856,40 +856,22 @@ static void gemm_f32_ggml(
     constexpr int KC = 1024;
     constexpr int NC = 32;
 
-    const int M_CEIL = (M + MR - 1) / MR * MR;
-
-    // 从 wdata 分配内存
-    size_t a_qs_packed_size = GGML_PAD(M_CEIL * K * sizeof(int8_t), 64);
-    //size_t a_d_packed_size  = GGML_PAD(M_CEIL * K_BLOCKS * sizeof(float), 64);
-
-    int8_t* A_qs_packed = (int8_t*)wdata;
-    float* A_d_packed = (float*)((char*) wdata + a_qs_packed_size);
-
     if constexpr (std::is_same_v<B_TYPE, block_q8_0>) {
         if (M <= MR) {
             #pragma omp parallel
             {
-                #pragma omp for schedule(static)
-                for (int j = 0; j < K_BLOCKS; ++j) {
-                    int8_t a_qs_buf[MR * QK8_0] __attribute__((aligned(64)));
-                    float* current_A_d_ptr = A_d_packed + j * MR;
-                    for (int row = 0; row < M; ++row) {
-                        quantize_block_q8_0(A + row * K + j * QK8_0, &current_A_d_ptr[row], &a_qs_buf[row * QK8_0]);
-                    }
-                    int8_t* current_qs_ptr = A_qs_packed + j * QK8_0 * MR;
-                    for (int k = 0; k < QK8_0; k += 4) {
-                        for (int row = 0; row < MR; ++row) {
-                            memcpy(current_qs_ptr, &a_qs_buf[row * QK8_0 + k], 4);
-                            current_qs_ptr += 4;
-                        }
-                    }
-                }
-
+                int8_t* A_qs_packed = (int8_t*) tls_arena.allocate(MR * K * sizeof(int8_t));
+                float* A_d_packed = (float*) tls_arena.allocate(MR * K_BLOCKS * sizeof(float));
                 // 2. 沿N维度并行计算。每个线程处理不同的列。
-                #pragma omp for schedule(dynamic)
+                bool packed = false;
+
+                #pragma omp for schedule(static)
                 for (int j = 0; j < N; j += NR) {
                     const int n_rem = std::min(NR, N - j);
-
+                    if (!packed) {
+                        pack_A_q8_0_f32(M, K, A, lda, A_qs_packed, A_d_packed);
+                        packed = true;
+                    }
                     // 调用融合了B打包的微内核。
                     // 这个内核会处理完整的K维度，并在内部即时打包B的数据块。
                     gemm_q8_0_microkernel_unpacked_b(
@@ -904,6 +886,16 @@ static void gemm_f32_ggml(
             return;
         }
     }
+
+    const int M_CEIL = (M + MR - 1) / MR * MR;
+
+    // 从 wdata 分配内存
+    size_t a_qs_packed_size = GGML_PAD(M_CEIL * K * sizeof(int8_t), 64);
+    //size_t a_d_packed_size  = GGML_PAD(M_CEIL * K_BLOCKS * sizeof(float), 64);
+
+    int8_t* A_qs_packed = (int8_t*)wdata;
+    float* A_d_packed = (float*)((char*) wdata + a_qs_packed_size);
+
 
     #pragma omp parallel
     {
