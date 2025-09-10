@@ -327,8 +327,8 @@ static void ggml_backend_blas_buffer_set_tensor(ggml_backend_buffer_t buffer, st
 
 static void ggml_backend_blas_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor);
-    enum repack r = *(enum repack*)tensor->extra;
-    if (r == Q8_0) {
+    enum repack *r = (enum repack*)tensor->extra;
+    if (r && *r == Q8_0) {
         const int K = tensor->ne[0];
          const int N = tensor->ne[1];
         int8_t* B_qs_packed = (int8_t*) tensor->data;
@@ -409,7 +409,7 @@ static size_t ggml_backend_blas_buffer_type_get_alignment(ggml_backend_buffer_ty
 }
 
 static bool ggml_backend_blas_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
-    return false;
+    return true;
 
     GGML_UNUSED(buft);
 }
