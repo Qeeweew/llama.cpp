@@ -1,10 +1,6 @@
 #define GGML_COMMON_IMPL_CPP
-#include "ggml-common.h"
 #include "tiny-blas.h"
-#include "ggml-impl.h"
 #include "simd-mappings.h"
-#include "ggml-quants.h"
-#include "tiny-blas.h"
 
 #include <iostream>
 #include <algorithm>
@@ -92,6 +88,60 @@ static inline void transpose_8x8_i32_avx2(__m256i row[8], __m256i col[8]) {
     col[7] = _mm256_permute2x128_si256(second3, second7, 0x31);
 }
 #endif
+
+void pack_B_q8_0(
+    int N, int K, const block_q8_0* B_q, int ldb_q,
+    int8_t* B_qs_packed, ggml_half* B_d_packed)
+{
+   const int K_BLOCKS = K / QK8_0;
+    for (int j = 0; j < N; j += NR) {
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < N) {
+                    *B_d_packed++ = (B_q + (j + col) * ldb_q + k_block)->d;
+                }
+            }
+        }
+
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int k_rem = 0; k_rem < QK8_0; k_rem += 4) {
+                for (int col = 0; col < NR; ++col) {
+                    if (j + col < N) {
+                        memcpy(B_qs_packed, (B_q + (j + col) * ldb_q + k_block)->qs + k_rem, 4);
+                    }
+                    B_qs_packed += 4;
+                }
+            }
+        }
+    }
+}
+
+void pack_B_q8_0_reverse(
+    int N, int K, block_q8_0* B_q, int ldb_q,
+    const int8_t* B_qs_packed, const ggml_half* B_d_packed)
+{
+   const int K_BLOCKS = K / QK8_0;
+    for (int j = 0; j < N; j += NR) {
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int col = 0; col < NR; ++col) {
+                if (j + col < N) {
+                    (B_q + (j + col) * ldb_q + k_block)->d = *B_d_packed++;
+                }
+            }
+        }
+
+        for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
+            for (int k_rem = 0; k_rem < QK8_0; k_rem += 4) {
+                for (int col = 0; col < NR; ++col) {
+                    if (j + col < N) {
+                        memcpy((B_q + (j + col) * ldb_q + k_block)->qs + k_rem, B_qs_packed, 4);
+                    }
+                    B_qs_packed += 4;
+                }
+            }
+        }
+    }
+}
 
 // 量化一个32个float的块为q8_0格式
 static inline void quantize_block_q8_0(const float *x, float* y_d, int8_t* y_qs) {
@@ -414,210 +464,6 @@ void pack_B<block_mxfp4>(
 #endif
 }
 
-// 声明新添加的用于 M <= MR 特化情况的函数
-template <int MR_T>
-static void gemm_q8_0_microkernel_unpacked_b_impl(
-    int K,
-    const int8_t* A_qs_packed, const float* A_d_packed,
-    const block_q8_0* B_q, int ldb_q, int n_rem,
-    float* C, int ldc);
-
-static void gemm_q8_0_microkernel_unpacked_b(
-    int K, int mr, int nr,
-    const int8_t* A_qs_packed, const float* A_d_packed,
-    const block_q8_0* B_q, int ldb_q,
-    float* C, int ldc);
-
-
-// 为 M <= MR 的情况特化的微内核，它融合了 pack_B 的操作
-template <int MR_T>
-static void gemm_q8_0_microkernel_unpacked_b_impl(
-    int K,
-    const int8_t* A_qs_packed, const float* A_d_packed,
-    const block_q8_0* B_q, int ldb_q, int n_rem,
-    float* C, int ldc)
-{
-    static_assert(MR_T > 0 && MR_T <= MR, "MR_T must be within (0, MR]");
-    assert(n_rem > 0 && n_rem <= NR);
-
-    const int K_BLOCKS = K / QK8_0;
-
-#if defined(__ARM_NEON)
-    float32x4_t c_v[MR_T];
-    for (int i = 0; i < MR_T; ++i) {
-        c_v[i] = vdupq_n_f32(0.0f);
-    }
-
-    for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-        const int8_t* a_ptr = A_qs_packed + k_block * QK8_0 * MR;
-        const float* ad_ptr = A_d_packed + k_block * MR;
-
-        int32x4_t sum_v[MR];
-        for (int i = 0; i < MR_T; ++i) sum_v[i] = vdupq_n_s32(0);
-        for (int k16 = 0; k16 < QK8_0; k16 += 16) {
-            int32x4x4_t b_buf;
-            for (int col = 0; col < n_rem; ++col) {
-                b_buf.val[col] = vld1q_s32(reinterpret_cast<const int32_t*>((B_q + col * ldb_q + k_block)->qs + k16));
-            }
-            transpose_4x4(b_buf);
-            for (int k4 = 0; k4 < 16; k4 += 4) {
-                int8x16_t a_vec_0, a_vec_1;
-                a_vec_0 = vld1q_s8(a_ptr);
-                a_ptr += 16;
-                if constexpr (MR_T > 4) a_vec_1 = vld1q_s8(a_ptr);
-                a_ptr += 16;
-                int8x16_t b_vec = vreinterpretq_s8_s32(b_buf.val[k4 / 4]);
-                if constexpr (MR_T > 0) sum_v[0] = vdotq_laneq_s32(sum_v[0], b_vec, a_vec_0, 0);
-                if constexpr (MR_T > 1) sum_v[1] = vdotq_laneq_s32(sum_v[1], b_vec, a_vec_0, 1);
-                if constexpr (MR_T > 2) sum_v[2] = vdotq_laneq_s32(sum_v[2], b_vec, a_vec_0, 2);
-                if constexpr (MR_T > 3) sum_v[3] = vdotq_laneq_s32(sum_v[3], b_vec, a_vec_0, 3);
-                if constexpr (MR_T > 4) sum_v[4] = vdotq_laneq_s32(sum_v[4], b_vec, a_vec_1, 0);
-                if constexpr (MR_T > 5) sum_v[5] = vdotq_laneq_s32(sum_v[5], b_vec, a_vec_1, 1);
-                if constexpr (MR_T > 6) sum_v[6] = vdotq_laneq_s32(sum_v[6], b_vec, a_vec_1, 2);
-                if constexpr (MR_T > 7) sum_v[7] = vdotq_laneq_s32(sum_v[7], b_vec, a_vec_1, 3);
-            }
-        }
-
-        ggml_half b_d_packed_tmp[NR];
-        for (int col = 0; col < n_rem; ++col) {
-            b_d_packed_tmp[col] = (B_q + col * ldb_q + k_block)->d;
-        }
-        const float32x4_t d_b_v = vcvt_f32_f16(vld1_f16((const __fp16 *) b_d_packed_tmp));
-        float32x4_t d_a_v0, d_a_v1;
-        d_a_v0 = vld1q_f32(ad_ptr);
-        if constexpr (MR_T > 4) d_a_v1 = vld1q_f32(ad_ptr + 4);
-
-        if constexpr (MR_T > 0) c_v[0] = vmlaq_laneq_f32(c_v[0], vmulq_f32(vcvtq_f32_s32(sum_v[0]), d_b_v), d_a_v0, 0);
-        if constexpr (MR_T > 1) c_v[1] = vmlaq_laneq_f32(c_v[1], vmulq_f32(vcvtq_f32_s32(sum_v[1]), d_b_v), d_a_v0, 1);
-        if constexpr (MR_T > 2) c_v[2] = vmlaq_laneq_f32(c_v[2], vmulq_f32(vcvtq_f32_s32(sum_v[2]), d_b_v), d_a_v0, 2);
-        if constexpr (MR_T > 3) c_v[3] = vmlaq_laneq_f32(c_v[3], vmulq_f32(vcvtq_f32_s32(sum_v[3]), d_b_v), d_a_v0, 3);
-        if constexpr (MR_T > 4) c_v[4] = vmlaq_laneq_f32(c_v[4], vmulq_f32(vcvtq_f32_s32(sum_v[4]), d_b_v), d_a_v1, 0);
-        if constexpr (MR_T > 5) c_v[5] = vmlaq_laneq_f32(c_v[5], vmulq_f32(vcvtq_f32_s32(sum_v[5]), d_b_v), d_a_v1, 1);
-        if constexpr (MR_T > 6) c_v[6] = vmlaq_laneq_f32(c_v[6], vmulq_f32(vcvtq_f32_s32(sum_v[6]), d_b_v), d_a_v1, 2);
-        if constexpr (MR_T > 7) c_v[7] = vmlaq_laneq_f32(c_v[7], vmulq_f32(vcvtq_f32_s32(sum_v[7]), d_b_v), d_a_v1, 3);
-    }
-
-    for (int i = 0; i < MR_T; ++i) {
-        vst1q_f32(C + i * ldc, c_v[i]);
-    }
-#elif defined (__AVX2__)
-    __m256 c_v[MR_T];
-    for (int i = 0; i < MR_T; ++i) {
-        c_v[i] = _mm256_setzero_ps();
-    }
-
-    for (int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-
-        const int8_t* a_ptr = A_qs_packed + k_block * QK8_0 * MR;
-        const float* ad_ptr = A_d_packed + k_block * MR;
-
-        // On-the-fly packing of B for one k_block
-        int8_t b_qs_packed_tmp[QK8_0 * NR] __attribute__((aligned(64)));
-        ggml_half b_d_packed_tmp[NR] __attribute__((aligned(64)));
-        {
-            __m256i row[8], col[8];
-            for (int col = 0; col < NR; ++col) {
-                b_d_packed_tmp[col] = (B_q + col * ldb_q + k_block)->d;
-                row[col] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>((B_q + col * ldb_q + k_block)->qs));
-            }
-            transpose_8x8_i32_avx2(row, col);
-
-            for (int i = 0; i < NR; ++i) {
-                _mm256_store_si256(reinterpret_cast<__m256i*>(b_qs_packed_tmp + i * QK8_0), col[i]);
-            }
-        }
-
-        const int8_t* b_ptr = b_qs_packed_tmp;
-
-        __m256i sum[MR];
-        for (int i = 0; i < MR_T; ++i) sum[i] = _mm256_setzero_si256();
-
-#if defined(__AVXVNNI__)
-        __m256i sum_a_vec = _mm256_setzero_si256();
-
-        for (int k = 0; k < QK8_0; k += 4) {
-            __m256i b_vec = _mm256_load_si256((__m256i const*)b_ptr);
-            b_vec = _mm256_sub_epi8(b_vec, _mm256_set1_epi8(-128)); // b_vec + 128
-            b_ptr += NR * 4;
-            __m256i a_vec = _mm256_load_si256((__m256i const*)a_ptr);
-            sum_a_vec = _mm256_dpbusd_avx_epi32(sum_a_vec, _mm256_set1_epi8(1), a_vec);
-
-            for (int i = 0; i < MR_T; ++i) {
-                __m256i a_vec = _mm256_set1_epi32(*((int*)(a_ptr + i * 4)));
-                sum[i] = _mm256_dpbusd_avx_epi32(sum[i], b_vec, a_vec);
-            }
-            a_ptr += MR * 4; // Move to next set of A data
-        }
-
-        __m256 bd_vec = _mm256_cvtph_ps(_mm_loadu_si128((__m128i const*) b_d_packed_tmp));
-
-        union { float f[8]; __m256 v; } sum_a_vec_f;
-        sum_a_vec_f.v = _mm256_cvtepi32_ps(sum_a_vec);
-        for (int i = 0; i < MR_T; ++i) {
-            __m256 sum_f = _mm256_fmadd_ps(_mm256_set1_ps(sum_a_vec_f.f[i]), _mm256_set1_ps(-128.0f), _mm256_cvtepi32_ps(sum[i]));
-            c_v[i] = _mm256_fmadd_ps(_mm256_mul_ps(sum_f, _mm256_broadcast_ss(&ad_ptr[i])) , bd_vec, c_v[i]);
-        }
-#else
-        for (int k = 0; k < QK8_0; k += 4) {
-            __m256i b_vec = _mm256_load_si256((__m256i const*)b_ptr);
-            b_ptr += NR * 4;
-
-            __m256i b_vec_abs = _mm256_sign_epi8(b_vec, b_vec); // abs
-            // Process each row of A
-            for (int i = 0; i < MR_T; ++i) {
-                __m256i a_vec = _mm256_set1_epi32(*((int*)(a_ptr + i * 4)));
-                __m256i a_vec_sign_b = _mm256_sign_epi8(a_vec, b_vec);
-                sum[i] += _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(b_vec_abs, a_vec_sign_b));
-            }
-            a_ptr += MR * 4; // Move to next set of A data
-        }
-
-        __m256 bd_vec = _mm256_cvtph_ps(_mm_loadu_si128((__m128i const*) b_d_packed_tmp));
-
-        for (int i = 0; i < MR_T; ++i) {
-            c_v[i] = _mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(sum[i]), _mm256_broadcast_ss(&ad_ptr[i])) , bd_vec, c_v[i]);
-        }
-#endif
-
-        ad_ptr += MR;
-    }
-
-    for (int i = 0; i < MR_T; ++i) { // Loop only up to MR_T
-        _mm256_storeu_ps(C + i * ldc, c_v[i]);
-    }
-#else
-    static_assert(false, "not implemented");
-#endif
-}
-
-// M <= MR 情况的微内核调度器
-static void gemm_q8_0_microkernel_unpacked_b(
-    int K, int mr, int nr,
-    const int8_t* A_qs_packed, const float* A_d_packed,
-    const block_q8_0* B_q, int ldb_q,
-    float* C, int ldc)
-{
-    assert(mr > 0 && mr <= MR && "mr value out of bounds for microkernel dispatch");
-    assert(nr > 0 && nr <= NR && "nr value out of bounds for microkernel dispatch");
-
-    switch (mr) {
-        case 1: gemm_q8_0_microkernel_unpacked_b_impl<1>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 2: gemm_q8_0_microkernel_unpacked_b_impl<2>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 3: gemm_q8_0_microkernel_unpacked_b_impl<3>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 4: gemm_q8_0_microkernel_unpacked_b_impl<4>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-#if (defined(__AVX2__) && MR == 8) || (defined(__ARM_NEON) && MR == 8)
-        case 5: gemm_q8_0_microkernel_unpacked_b_impl<5>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 6: gemm_q8_0_microkernel_unpacked_b_impl<6>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 7: gemm_q8_0_microkernel_unpacked_b_impl<7>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-        case 8: gemm_q8_0_microkernel_unpacked_b_impl<8>(K, A_qs_packed, A_d_packed, B_q, ldb_q, nr, C, ldc); break;
-#endif
-        default:
-            std::cerr << "Error: Unsupported mr value (" << mr << ") for gemm_q8_0_microkernel_unpacked_b dispatch." << std::endl;
-            exit(1);
-    }
-}
-
-
 const size_t ALIGNMENT = 64; // 64 bytes for AVX-512 or general good practice
 
 // --- 线程局部缓冲区管理 (简单的内存池) ---
@@ -663,11 +509,13 @@ public:
 static thread_local ThreadLocalBufferArena tls_arena(256 * 1024);
 
 // 核心计算Kernel模板，针对不同的mr值进行特化以避免不必要的计算
-template<int MR_T>
-static void gemm_q8_0_microkernel_impl(
+
+// Template specialized microkernel implementation
+template <int MR_T, typename B_SCALE_TYPE>
+static void gemm_q8_0_microkernel_specialized(
     int kc_size,
     const int8_t* A_qs_packed, const float* A_d_packed,
-    const int8_t* B_qs_packed, const float* B_d_packed,
+    const int8_t* B_qs_packed, const B_SCALE_TYPE* B_d_packed,
     float* C, int ldc,
     bool accumulate)
 {
@@ -689,7 +537,7 @@ static void gemm_q8_0_microkernel_impl(
     const int8_t* a_ptr = A_qs_packed;
     const int8_t* b_ptr = B_qs_packed;
     const float* ad_ptr = A_d_packed;
-    const float* bd_ptr = B_d_packed;
+    const B_SCALE_TYPE* bd_ptr = B_d_packed;
 
     for (int k_block = 0; k_block < KC_BLOCKS; ++k_block) {
         int32x4_t sum_v[MR_T];
@@ -718,14 +566,28 @@ static void gemm_q8_0_microkernel_impl(
             if constexpr (MR_T > 7) sum_v[7] = vdotq_laneq_s32(sum_v[7], b_vec, a_vec_1, 3);
         }
 
-        const float32x4_t d_b_v = vld1q_f32(bd_ptr);
+        float32x4_t d_b_v;
+        if constexpr (std::is_same_v<B_SCALE_TYPE, float>) {
+            d_b_v = vld1q_f32(bd_ptr);
+        } else {
+            d_b_v = vcvt_f32_f16(vld1_f16((const __fp16 *) bd_ptr));
+        }
         bd_ptr += NR;
 
-        for (int i = 0; i < MR_T; ++i) {
-            c_v[i] = vmlaq_n_f32(c_v[i], vmulq_f32(vcvtq_f32_s32(sum_v[i]), d_b_v), ad_ptr[i]);
-        }
-
+        float32x4_t d_a_v0, d_a_v1;
+        d_a_v0 = vld1q_f32(ad_ptr);
+        if constexpr (MR_T > 4) d_a_v1 = vld1q_f32(ad_ptr + 4);
         ad_ptr += MR;
+
+        if constexpr (MR_T > 0) c_v[0] = vmlaq_laneq_f32(c_v[0], vmulq_f32(vcvtq_f32_s32(sum_v[0]), d_b_v), d_a_v0, 0);
+        if constexpr (MR_T > 1) c_v[1] = vmlaq_laneq_f32(c_v[1], vmulq_f32(vcvtq_f32_s32(sum_v[1]), d_b_v), d_a_v0, 1);
+        if constexpr (MR_T > 2) c_v[2] = vmlaq_laneq_f32(c_v[2], vmulq_f32(vcvtq_f32_s32(sum_v[2]), d_b_v), d_a_v0, 2);
+        if constexpr (MR_T > 3) c_v[3] = vmlaq_laneq_f32(c_v[3], vmulq_f32(vcvtq_f32_s32(sum_v[3]), d_b_v), d_a_v0, 3);
+
+        if constexpr (MR_T > 4) c_v[4] = vmlaq_laneq_f32(c_v[4], vmulq_f32(vcvtq_f32_s32(sum_v[4]), d_b_v), d_a_v1, 0);
+        if constexpr (MR_T > 5) c_v[5] = vmlaq_laneq_f32(c_v[5], vmulq_f32(vcvtq_f32_s32(sum_v[5]), d_b_v), d_a_v1, 1);
+        if constexpr (MR_T > 6) c_v[6] = vmlaq_laneq_f32(c_v[6], vmulq_f32(vcvtq_f32_s32(sum_v[6]), d_b_v), d_a_v1, 2);
+        if constexpr (MR_T > 7) c_v[7] = vmlaq_laneq_f32(c_v[7], vmulq_f32(vcvtq_f32_s32(sum_v[7]), d_b_v), d_a_v1, 3);
     }
 
     for (int i = 0; i < MR_T; ++i) {
@@ -748,12 +610,12 @@ static void gemm_q8_0_microkernel_impl(
     const int8_t* a_ptr = A_qs_packed;
     const int8_t* b_ptr = B_qs_packed;
     const float* ad_ptr = A_d_packed;
-    const float* bd_ptr = B_d_packed;
+    const B_SCALE_TYPE* bd_ptr = B_d_packed;
 
     for (int k_block = 0; k_block < KC_BLOCKS; ++k_block) {
         __m256i sum[MR];
         for (int i = 0; i < MR_T; ++i) sum[i] = _mm256_setzero_si256();
- 
+
 #if defined(__AVXVNNI__)
         __m256i sum_a_vec = _mm256_setzero_si256();
 
@@ -771,7 +633,12 @@ static void gemm_q8_0_microkernel_impl(
             a_ptr += MR * 4; // Move to next set of A data
         }
 
-        __m256 bd_vec = _mm256_loadu_ps(bd_ptr);
+        __m256 bd_vec;
+        if constexpr (std::is_same_v<B_SCALE_TYPE, float>) {
+            bd_vec = _mm256_loadu_ps(bd_ptr);
+        } else {
+            bd_vec = _mm256_cvtph_ps(_mm_loadu_si128((__m128i const*) bd_ptr));
+        }
         bd_ptr += NR;
 
         union { float f[8]; __m256 v; } sum_a_vec_f;
@@ -788,9 +655,9 @@ static void gemm_q8_0_microkernel_impl(
             __m256i b_vec_abs = _mm256_sign_epi8(b_vec, b_vec); // abs
             // Process each row of A
             for (int i = 0; i < MR_T; ++i) {
-                __m256i a_vec = _mm256_set1_epi32(*((const int*)(a_ptr + i * 4)));
+                __m256i a_vec = _mm256_set1_epi32(*((int*)(a_ptr + i * 4)));
                 __m256i a_vec_sign_b = _mm256_sign_epi8(a_vec, b_vec);
-                    sum[i] += _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(b_vec_abs, a_vec_sign_b));
+                sum[i] += _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(b_vec_abs, a_vec_sign_b));
             }
             a_ptr += MR * 4; // Move to next set of A data
         }
@@ -810,33 +677,42 @@ static void gemm_q8_0_microkernel_impl(
         _mm256_storeu_ps(C + i * ldc, c_v[i]);
     }
 #else
-    static_assert(false, "gemm_q8_0_microkernel_impl is only supported on ARM NEON or x86 AVX2");
+    // Error case if neither NEON nor AVX2 is defined
+    std::cerr << "Error: gemm_q8_0_microkernel_specialized requires either ARM NEON or AVX2." << std::endl;
+    exit(1);
 #endif
 }
-// 核心计算Kernel (分发器)，根据mr调用相应的模板实例
+
+template<typename B_SCALE_TYPE>
 static void gemm_q8_0_microkernel(
-    int kc_size, int mr,
+    int kc_size, int mr, // 'mr' is the runtime value
     const int8_t* A_qs_packed, const float* A_d_packed,
-    const int8_t* B_qs_packed, const float* B_d_packed,
+    const int8_t* B_qs_packed, const B_SCALE_TYPE* B_d_packed,
     float* C, int ldc,
     bool accumulate)
 {
+    // Ensure mr is within the valid range for the defined MR (max micro-rows)
+    assert(mr > 0 && mr <= MR && "mr value out of bounds for microkernel dispatch");
+
+    // Dispatch to the specialized template function
     switch (mr) {
-        case 1: gemm_q8_0_microkernel_impl<1>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 2: gemm_q8_0_microkernel_impl<2>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 3: gemm_q8_0_microkernel_impl<3>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 4: gemm_q8_0_microkernel_impl<4>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-#if (defined(__AVX2__) && MR == 8) || (defined(__ARM_NEON) && MR == 8)
-        case 5: gemm_q8_0_microkernel_impl<5>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 6: gemm_q8_0_microkernel_impl<6>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 7: gemm_q8_0_microkernel_impl<7>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 8: gemm_q8_0_microkernel_impl<8>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 1: gemm_q8_0_microkernel_specialized<1>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 2: gemm_q8_0_microkernel_specialized<2>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 3: gemm_q8_0_microkernel_specialized<3>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 4: gemm_q8_0_microkernel_specialized<4>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+#if (defined(__AVX2__) && MR == 8) || (defined(__ARM_NEON) && MR == 8) // MR is 8 for both architectures in the provided code
+        case 5: gemm_q8_0_microkernel_specialized<5>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 6: gemm_q8_0_microkernel_specialized<6>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 7: gemm_q8_0_microkernel_specialized<7>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
+        case 8: gemm_q8_0_microkernel_specialized<8>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
 #endif
         default:
-            assert(false); // mr的值应该在[1, 8]的范围内
-            break;
+            // Fallback for unsupported mr values (should ideally be caught by assert)
+            std::cerr << "Error: Unsupported mr value (" << mr << ") for gemm_q8_0_microkernel dispatch." << std::endl;
+            exit(1);
     }
 }
+
 
 // =================================================================================================
 // 主计算函数 (模板化)
@@ -855,38 +731,6 @@ static void gemm_f32_ggml(
     constexpr int MC = 32;
     constexpr int KC = 1024;
     constexpr int NC = 32;
-
-    if constexpr (std::is_same_v<B_TYPE, block_q8_0>) {
-        if (M <= MR) {
-            #pragma omp parallel
-            {
-                int8_t* A_qs_packed = (int8_t*) tls_arena.allocate(MR * K * sizeof(int8_t));
-                float* A_d_packed = (float*) tls_arena.allocate(MR * K_BLOCKS * sizeof(float));
-                // 2. 沿N维度并行计算。每个线程处理不同的列。
-                bool packed = false;
-
-                #pragma omp for schedule(static)
-                for (int j = 0; j < N; j += NR) {
-                    const int n_rem = std::min(NR, N - j);
-                    if (!packed) {
-                        pack_A_q8_0_f32(M, K, A, lda, A_qs_packed, A_d_packed);
-                        packed = true;
-                    }
-                    // 调用融合了B打包的微内核。
-                    // 这个内核会处理完整的K维度，并在内部即时打包B的数据块。
-                    gemm_q8_0_microkernel_unpacked_b(
-                        K, M, n_rem,
-                        A_qs_packed,
-                        A_d_packed,
-                        B_q + j * K_BLOCKS, K_BLOCKS,
-                        C + j, N
-                    );
-                }
-                tls_arena.reset();
-            }
-            return;
-        }
-    }
 
     const int M_CEIL = (M + MR - 1) / MR * MR;
 
@@ -1198,3 +1042,87 @@ bool tiny_moe_sgemm(int cols, int rows, int n_expert, int n_expert_used, int n_t
     }
     return true;
 }
+
+void gemm_q8_0_gotoblas_omp_packed(
+    int M, int N, int K,
+    const float* A,
+    const int8_t* B_qs_packed,
+    const ggml_half* B_d_packed_f16,
+    float* C, void* wdata)
+{
+    assert(K % QK8_0 == 0);
+    const int K_BLOCKS = K / QK8_0;
+
+    const int M_CEIL = (M + MR - 1) / MR * MR;
+
+    // 从 wdata 分配内存
+    size_t a_qs_packed_size = GGML_PAD(M_CEIL * K * sizeof(int8_t), 64);
+    //size_t a_d_packed_size  = GGML_PAD(M_CEIL * K_BLOCKS * sizeof(float), 64);
+
+    int8_t* A_qs_packed = (int8_t*)wdata;
+    float* A_d_packed = (float*)((char*) wdata + a_qs_packed_size);
+
+    // =================================================================
+    // 常规路径: 当 M > MR 时 (原始代码逻辑)
+    // =================================================================
+    assert(N % NR == 0); // 常规路径假定N是NR的倍数
+
+    const int MC = 32;
+    const int KC = 1024;
+    const int NC = 32;
+
+    #pragma omp parallel
+    {
+        // 阶段 1: 并行化 pack_A
+        #pragma omp for collapse(2)
+        for (int i = 0; i < M; i += MR) {
+            for (int j = 0; j < K_BLOCKS; ++j) {
+                int8_t a_qs_buf[MR * QK8_0] __attribute__((aligned(64)));
+                int M_rem = std::min(MR, M - i);
+                float* A_d_packed_ptr = A_d_packed + i * K_BLOCKS;
+                int8_t* A_qs_packed_ptr = A_qs_packed + i * K;
+                float* current_A_d_ptr = A_d_packed_ptr + j * MR;
+                for (int row = 0; row < M_rem; ++row) {
+                    quantize_block_q8_0(A + (i + row) * K + j * QK8_0, &current_A_d_ptr[row], &a_qs_buf[row * QK8_0]);
+                }
+                int8_t* current_qs_ptr = A_qs_packed_ptr + j * QK8_0 * MR;
+                for (int k = 0; k < QK8_0; k += 4) {
+                    for (int row = 0; row < MR; ++row) {
+                        memcpy(current_qs_ptr, &a_qs_buf[row * QK8_0 + k], 4);
+                        current_qs_ptr += 4;
+                    }
+                }
+            }
+        }
+
+        // 阶段 2: 并行化 GEMM 计算
+
+        #pragma omp for schedule(dynamic)
+        for (int jc = 0; jc < N; jc += NC) {
+            const int nc = std::min(NC, N - jc);
+
+            for (int kc = 0; kc < K; kc += KC) {
+                const int kc_size = std::min(KC, K - kc);
+                const int k_block_offset = kc / QK8_0;
+
+                for (int ic = 0; ic < M; ic += MC) {
+                    const int mc = std::min(MC, M - ic);
+
+                    for (int jr = 0; jr < nc; jr += NR) {
+                        for (int ir = 0; ir < mc; ir += MR) {
+                            gemm_q8_0_microkernel(
+                                kc_size, std::min(MR, mc - ir),
+                                A_qs_packed + (ic + ir) * K + kc * MR,
+                                A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
+                                B_qs_packed + (jc + jr) * K + kc * NR,
+                                B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
+                                C + (ic + ir) * N + (jc + jr), N,
+                                kc != 0
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+ }
