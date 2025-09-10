@@ -57,7 +57,7 @@ static void ggml_backend_blas_mul_mat(ggml_backend_blas_context * ctx, struct gg
 
     omp_set_num_threads(ctx->n_threads);
 
-    if (*((enum repack*)(src0->extra)) == Q8_0) {
+    if (src0->extra && *((enum repack*)(src0->extra)) == Q8_0) {
         for (int64_t i13 = 0; i13 < ne13; i13++) {
             for (int64_t i12 = 0; i12 < ne12; i12++) {
                 const int8_t* B_qs_packed = (const int8_t *) ((const char *)src0->data + i12/r2*nb02 + i13/r3*nb03);
@@ -262,7 +262,7 @@ static void ggml_backend_blas_device_get_props(ggml_backend_dev_t dev, struct gg
     props->caps = {
         /* .async                 = */ false,
         /* .host_buffer           = */ false,
-        /* .buffer_from_host_ptr  = */ true,
+        /* .buffer_from_host_ptr  = */ false,
         /* .events                = */ false,
     };
 }
@@ -369,18 +369,6 @@ static const struct ggml_backend_buffer_i ggml_backend_blas_buffer_i = {
     /* .reset           = */ NULL,
 };
 
-static const struct ggml_backend_buffer_i ggml_backend_blas_buffer_from_ptr_i = {
-    /* .free_buffer     = */ NULL, // ptr is not owned by the buffer, so it does not need to be freed
-    /* .get_base        = */ ggml_backend_blas_buffer_get_base,
-    /* .init_tensor     = */ NULL, // no initialization required
-    /* .memset_tensor   = */ ggml_backend_blas_buffer_memset_tensor,
-    /* .set_tensor      = */ ggml_backend_blas_buffer_set_tensor,
-    /* .get_tensor      = */ ggml_backend_blas_buffer_get_tensor,
-    /* .cpy_tensor      = */ ggml_backend_blas_buffer_cpy_tensor,
-    /* .clear           = */ ggml_backend_blas_buffer_clear,
-    /* .reset           = */ NULL,
-};
-
 // CPU backend buffer type
 
 // this buffer type is defined here to make it available to all backends
@@ -409,7 +397,7 @@ static size_t ggml_backend_blas_buffer_type_get_alignment(ggml_backend_buffer_ty
 }
 
 static bool ggml_backend_blas_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
-    return true;
+    return false;
 
     GGML_UNUSED(buft);
 }
@@ -452,18 +440,6 @@ static ggml_backend_buffer_type_t ggml_backend_blas_buffer_from_ptr_type(void) {
     };
 
     return &ggml_backend_blas_buffer_type;
-}
-
-static ggml_backend_buffer_t ggml_backend_blas_buffer_from_ptr(void * ptr, size_t size) {
-    GGML_ASSERT((uintptr_t)ptr % TENSOR_ALIGNMENT == 0 && "buffer pointer must be aligned");
-    return ggml_backend_buffer_init(ggml_backend_blas_buffer_from_ptr_type(), ggml_backend_blas_buffer_from_ptr_i, ptr, size);
-}
-
-static ggml_backend_buffer_t ggml_backend_blas_device_buffer_from_host_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
-    return ggml_backend_blas_buffer_from_ptr(ptr, size);
-
-    GGML_UNUSED(dev);
-    GGML_UNUSED(max_tensor_size);
 }
 
 static ggml_backend_buffer_type_t ggml_backend_blas_device_get_buffer_type(ggml_backend_dev_t dev) {
@@ -517,8 +493,7 @@ static bool ggml_backend_blas_device_supports_op(ggml_backend_dev_t dev, const s
 }
 
 static bool ggml_backend_blas_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    return ggml_backend_buft_is_host(buft);
-
+    return buft->iface.get_name == ggml_backend_blas_buffer_type_get_name;
     GGML_UNUSED(dev);
 }
 
@@ -531,7 +506,7 @@ static const struct ggml_backend_device_i ggml_backend_blas_device_i = {
     /* .init_backend         = */ ggml_backend_blas_device_init_backend,
     /* .get_buffer_type      = */ ggml_backend_blas_device_get_buffer_type,
     /* .get_host_buffer_type = */ NULL,
-    /* .buffer_from_host_ptr = */ ggml_backend_blas_device_buffer_from_host_ptr,
+    /* .buffer_from_host_ptr = */ NULL,
     /* .supports_op          = */ ggml_backend_blas_device_supports_op,
     /* .supports_buft        = */ ggml_backend_blas_device_supports_buft,
     /* .offload_op           = */ NULL,

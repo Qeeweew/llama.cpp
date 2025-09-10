@@ -1097,28 +1097,46 @@ void gemm_q8_0_gotoblas_omp_packed(
 
         // 阶段 2: 并行化 GEMM 计算
 
-        #pragma omp for schedule(dynamic)
-        for (int jc = 0; jc < N; jc += NC) {
-            const int nc = std::min(NC, N - jc);
+        if (M <= MR) {
+            #pragma omp for schedule(dynamic)
+            for (int jc = 0; jc < N; jc += NC) {
+                const int nc = std::min(NC, N - jc);
+                for (int jr = 0; jr < nc; jr += NR) {
+                    gemm_q8_0_microkernel(
+                        K, M,
+                        A_qs_packed,
+                        A_d_packed,
+                        B_qs_packed + (jc + jr) * K,
+                        B_d_packed_f16 + (jc + jr) * K_BLOCKS,
+                        C + (jc + jr), N,
+                        false
+                    );
+                }
+            }
+        } else {
+            #pragma omp for schedule(dynamic)
+            for (int jc = 0; jc < N; jc += NC) {
+                const int nc = std::min(NC, N - jc);
 
-            for (int kc = 0; kc < K; kc += KC) {
-                const int kc_size = std::min(KC, K - kc);
-                const int k_block_offset = kc / QK8_0;
+                for (int kc = 0; kc < K; kc += KC) {
+                    const int kc_size = std::min(KC, K - kc);
+                    const int k_block_offset = kc / QK8_0;
 
-                for (int ic = 0; ic < M; ic += MC) {
-                    const int mc = std::min(MC, M - ic);
+                    for (int ic = 0; ic < M; ic += MC) {
+                        const int mc = std::min(MC, M - ic);
 
-                    for (int jr = 0; jr < nc; jr += NR) {
-                        for (int ir = 0; ir < mc; ir += MR) {
-                            gemm_q8_0_microkernel(
-                                kc_size, std::min(MR, mc - ir),
-                                A_qs_packed + (ic + ir) * K + kc * MR,
-                                A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
-                                B_qs_packed + (jc + jr) * K + kc * NR,
-                                B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
-                                C + (ic + ir) * N + (jc + jr), N,
-                                kc != 0
-                            );
+                        for (int jr = 0; jr < nc; jr += NR) {
+                            for (int ir = 0; ir < mc; ir += MR) {
+                                gemm_q8_0_microkernel(
+                                    kc_size, std::min(MR, mc - ir),
+                                    A_qs_packed + (ic + ir) * K + kc * MR,
+                                    A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
+                                    B_qs_packed + (jc + jr) * K + kc * NR,
+                                    B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
+                                    C + (ic + ir) * N + (jc + jr), N,
+                                    kc != 0
+                                );
+                            }
                         }
                     }
                 }
